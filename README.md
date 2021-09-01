@@ -4,6 +4,7 @@ just meant as an example of how wrapping of bos can be done in node
 
 this is not ready for anyone to use and was just for experimentation I was doing
 
+`bos.js` is where I place bos function wrappers and then call them from messy experiments I'm testing out in `index.js`
 
 DO NOT USE AS IS
 
