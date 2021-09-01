@@ -1,0 +1,13 @@
+{
+  "name": "boslolbot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "npm link balanceofsatoshis && node index.js"
+  },
+  "author": "",
+  "license": "MIT license",
+  "dependencies": {}
+}
