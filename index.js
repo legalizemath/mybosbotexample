@@ -27,6 +27,11 @@ const runBotUpdateStep = async () => {
 
   const {localChannel, remoteChannel} = await runBotPickRandomPeers({peers})
 
+  if (!localChannel || !remoteChannel) {
+    console.log(`${getDate()} no unbalanced pairs to match`)
+    return undefined
+  }
+  
   for (let r = 1; r <= MAX_BALANCE_REPEATS; r++) {
     console.log(`${getDate()} Balancing run #${r}`)
     const balancing = await runBotRebalancePeers({localChannel, remoteChannel}, r === 1)
