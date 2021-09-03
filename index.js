@@ -22,12 +22,12 @@ const WEIGHT_OPTIONS = {                  // what to weight random selection by
   MY_FEE_RATE: 'my_fee_rate'
 }
 const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS   // rnd weight choice
-const USE_KEYSENDS_AFTER_BALANCE = false        // rebalance with faster keysends after bos rebalance works
+const USE_KEYSENDS_AFTER_BALANCE = true         // rebalance with faster keysends after bos rebalance works
 const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
 const TIMERS_PATH = 'timers.json'
 
-// have to make this settings file or replace with public key here
+// required own public key for keysends to self to rebalance
 const { MY_PUBLIC_KEY } = JSON.parse(fs.readFileSync('settings.json'))
 
 const runBotUpdateStep = async () => {
@@ -353,7 +353,7 @@ const updateFees = async () => {
       ppmFair = Math.trunc(ppmFair)
 
       // increase ppm by safety multiplier or by min ppm increase, whichever is greater, otherwise just use current
-      const ppmSafe = Math.trunc(Math.max(peer.my_fee_rate, ppmFair * !ignoreSafety ? SAFETY_MARGIN : 1, ppmFair + !ignoreSafety ? MIN_PPM_FOR_SAFETY : 0))
+      const ppmSafe = Math.trunc(Math.max(peer.my_fee_rate, ppmFair * (!ignoreSafety ? SAFETY_MARGIN : 1), ppmFair + (!ignoreSafety ? MIN_PPM_FOR_SAFETY : 0)))
       // cap ppm
       const ppmSane = Math.trunc(Math.min(MAX_PPM_ABSOLUTE, ppmSafe))
 
