@@ -1,8 +1,10 @@
 # mybosbotexample
 
-just meant as an example of how wrapping of bos can be done in node
+just meant as an example of how wrapping of bos (balanceofsatoshis) can be done in node
 
-this is not ready for anyone to use and was just for experimentation I was doing
+this does everything through bos by wrapping the js functions bos uses to act on terminal commands, bos wasn't made for calling these functions directly from other projects (yet) so compatibility can easily change and should be just used as an example
+
+this is not ready for anyone to use and was just for experimentation I was doing, it's nowhere close to a working project
 
 `bos.js` is where I place bos function wrappers and then call them from messy experiments I'm testing out in `index.js`
 
