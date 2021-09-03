@@ -1,7 +1,7 @@
 import fs from 'fs'
 import bos from './bos.js'
 
-const MINUTES_BETWEEN_STEPS = 15          // time to sleep between trying a bot step again
+const MINUTES_BETWEEN_STEPS = 10          // time to sleep between trying a bot step again
 const MIN_CHAN_SIZE = 1.5e6               // channels smaller than this not necessary to balance
 const MIN_OFF_BALANCE = 0.1               // channels less off-balance are not necessary to balance
 const MAX_REBALANCE_SATS = 4.2e5          // limit of sats to balance per attempt
@@ -22,12 +22,12 @@ const WEIGHT_OPTIONS = {                  // what to weight random selection by
   MY_FEE_RATE: 'my_fee_rate'
 }
 const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS   // rnd weight choice
-const USE_KEYSENDS_AFTER_BALANCE = true     // rebalance with faster keysends after bos rebalance works
+const USE_KEYSENDS_AFTER_BALANCE = false        // rebalance with faster keysends after bos rebalance works
 const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
 const TIMERS_PATH = 'timers.json'
 
-// has to be specified bc I haven't found command to get my own public key easily yet
+// have to make this settings file or replace with public key here
 const { MY_PUBLIC_KEY } = JSON.parse(fs.readFileSync('settings.json'))
 
 const runBotUpdateStep = async () => {
@@ -311,7 +311,7 @@ const runUpdateFees = async () => {
   }
 }
 
-// logic for updating fees 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀
+// logic for updating fees
 const updateFees = async () => {
   console.log(`${getDate()} updateFees()`)
 
@@ -364,8 +364,8 @@ const updateFees = async () => {
       const ppmNew = Math.trunc(peer.my_fee_rate * (1 - NUDGE) + ppmSane * NUDGE) + (isIncreasing ? 1 : 0)
 
       console.log(`${getDate()} "${peer.alias}" ${peer.public_key.slice(0, 10)} fee rate increase check:
-        ${getDate()} rebalancingStats all: ${JSON.stringify(all)}
-        ${getDate()} rebalancingStats worked: ${JSON.stringify(worked)}
+        rebalancingStats all: ${JSON.stringify(all)}
+        rebalancingStats worked: ${JSON.stringify(worked)}
 
         current stats       ${peer.my_fee_rate} ppm [${(peer.outbound_liquidity / 1e6).toFixed(1)}M <---> ${(peer.inbound_liquidity / 1e6).toFixed(1)}M] ${peer.inbound_fee_rate} ppm peer
         fair value          ${ppmFair} ppm
