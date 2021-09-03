@@ -1,7 +1,7 @@
 import fs from 'fs'
 import bos from './bos.js'
 
-const MINUTES_BETWEEN_STEPS = 1           // time to sleep between trying a bot step again
+const MINUTES_BETWEEN_STEPS = 15          // time to sleep between trying a bot step again
 const MIN_CHAN_SIZE = 1.5e6               // channels smaller than this not necessary to balance
 const MIN_OFF_BALANCE = 0.1               // channels less off-balance are not necessary to balance
 const MAX_REBALANCE_SATS = 4.2e5          // limit of sats to balance per attempt
@@ -27,6 +27,7 @@ const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
 const TIMERS_PATH = 'timers.json'
 
+// has to be specified bc I haven't found command to get my own public key easily yet
 const { MY_PUBLIC_KEY } = JSON.parse(fs.readFileSync('settings.json'))
 
 const runBotUpdateStep = async () => {
