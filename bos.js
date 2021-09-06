@@ -12,15 +12,35 @@ import lnd from 'balanceofsatoshis/lnd/index.js'
 import {
   pushPayment as bosPushPayment,
   reconnect as bosReconnect,
-  getPeers as bosGetPeers
+  getPeers as bosGetPeers,
+  getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
 
 // use existing global bos authentication
 const authenticatedLnd = lnd.authenticatedLnd({})
 
+const forwards = async (choices = {}, log = false) => {
+  try {
+    console.boring(`${getDate()} bos.forwards()`)
+    const res = await bosGetForwards({
+      lnd: (await authenticatedLnd).lnd, // required
+      fs: {getFile: readFile}, // required
+      days: 1,
+      // [from: public key]
+      // [to: public key]
+      ...choices
+    })
+    log && console.log(`${getDate()} bos.forwards() complete`, res)
+    return res.peers
+  } catch (e) {
+    console.error(`\n${getDate()} bos.forwards() aborted:`, JSON.stringify(e))
+    return []
+  }
+}
+
 const reconnect = async (log = false) => {
   try {
-    log && console.log(`${getDate()} bos.reconnect()`)
+    console.boring(`${getDate()} bos.reconnect()`)
     const res = await bosReconnect({
       lnd: (await authenticatedLnd).lnd
     })
@@ -42,16 +62,16 @@ const rebalance = async ({
     const options = {
       out_through: fromChannel,
       in_through: toChannel,
-      max_rebalance: String(maxSats),
+      max_rebalance: String(Math.trunc(maxSats)),
       timeout_minutes: Math.trunc(maxMinutes),
-      max_fee_rate: maxFeeRate,
+      max_fee_rate: Math.trunc(maxFeeRate),
       max_fee: Math.trunc(maxSats * 0.010000) // unused, 10k ppm
     }
-    console.log(`${getDate()} bos.rebalance()`, log ? JSON.stringify(options) : '')
+    console.boring(`${getDate()} bos.rebalance()`, log ? JSON.stringify(options) : '')
     const res = await bosRebalance({
       ...options,
       fs: {getFile: readFile}, // required
-      lnd: (await authenticatedLnd).lnd,
+      lnd: (await authenticatedLnd).lnd, // required
       logger: { info: v => log ? console.log(getDate(),v) : process.stdout.write('.') },
       avoid: [], // seems necessary
       out_channels: [] // seems necessary
@@ -83,7 +103,7 @@ const send = async ({
 }, log = false) => {
   const options = {
     amount: String(Math.trunc(sats)),
-    destination: destination,
+    destination,
     out_through: fromChannel,
     in_through: toChannel,
     // uses max fee (sats) only so calculated from max fee rate (ppm)
@@ -92,7 +112,7 @@ const send = async ({
     timeout_minutes: Math.trunc(maxMinutes)
   }
   try {
-    console.log(`${getDate()} bos.send()`, log ? JSON.stringify(options) : '')
+    console.boring(`${getDate()} bos.send()`, log ? JSON.stringify(options) : '')
     const res = await bosPushPayment({
       ...options,
       fs: {getFile: readFile}, // required
@@ -111,7 +131,7 @@ const send = async ({
       rebalanced: Math.trunc(+res.paid - +res.fee)
     }
   } catch (e) {
-    console.log(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
     return {
@@ -129,7 +149,7 @@ const send = async ({
 // returns new set fee
 const setFees = async (peerPubKey, fee_rate, log = false) => {
   try {
-    log && console.log(`${getDate()} bos.setFees()`)
+    console.boring(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
       fs: {getFile: readFile}, // required
       lnd: (await authenticatedLnd).lnd,
@@ -148,13 +168,16 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 
 
 // bos call api commands to lnd
+// bos call getIdentity - get my pub key
+// bos call getForwards - forwarding events
+// bos call getChannels - on-chain channel info
+// bos call getFeeRates - has base fee info (via channel or tx ids, not pubkeys)
+// bos call getForwards - choices: either {limit: 5} or {token: '{"offset":10,"limit":5}'}
+// names for methods and choices for arguments via `bos call` or here
+// https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
 const callAPI = async (method, choices = {}) => {
-  // names for methods and choices for arguments via `bos call` or here
-  // https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
-  // getFeeRates: my outgoing base_fee_mtokens and fee_rate via NNNNNNxNNNxVOUT id or transaction_id and transaction_vout
-  // getChannels has channel specific information but no fees
   try {
-    console.log(`${getDate()} bos.callAPI() for ${method}`)
+    console.boring(`${getDate()} bos.callAPI() for ${method}`)
     return await callRawApi({
       lnd: (await authenticatedLnd).lnd,
       method,
@@ -166,31 +189,29 @@ const callAPI = async (method, choices = {}) => {
   }
 }
 
-
-// returns {public_key, inbound_liquidity, outbound_liquidity, inbound_fee_rate, alias}
-const getPeers = async (options = {}, log = false) => {
+const peers = async (choices = {}, log = false) => {
   try {
-    log && console.log(`${getDate()} bos.getPeers()`)
+    console.boring(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
       fs: {getFile: readFile}, // required
       lnd: (await authenticatedLnd).lnd,
       omit: [], // required
       active: true, // only connected peers
       public: true, // only public peers
-      ...options
+      ...choices
     })
     const peers = res.peers
 
     // convert fee rate to just ppm
     .map(peer => ({
       ...peer,
-      inbound_fee_rate: peer.inbound_fee_rate?.match(/\((.*)\)/)[1]
+      inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1] || 0
     }))
 
-    log && console.log(`${getDate()} bos.getPeers()`, JSON.stringify(peers, (k, v) => v === undefined ? 'undefined' : v, 2))
+    log && console.boring(`${getDate()} bos.peers()`, JSON.stringify(peers, (k, v) => v === undefined ? 'undefined' : v, 2))
     return peers
   } catch (e) {
-    console.error(`${getDate()} bos.getPeers() aborted:`, e)
+    console.error(`${getDate()} bos.peers() aborted:`, e)
     return []
   }
 }
@@ -198,7 +219,7 @@ const getPeers = async (options = {}, log = false) => {
 // returns {pubkey: my_ppm_fee_rate}
 const getFees = async (log = false) => {
   try {
-    log && console.log(`${getDate()} bos.getFees()`)
+    console.boring(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
       fs: {getFile: readFile}, // required
       lnd: (await authenticatedLnd).lnd,
@@ -209,7 +230,7 @@ const getFees = async (log = false) => {
       .slice(1) // remove table headers row
       .reduce((feeRates, thisPeer) => {
         const pubKey = thisPeer[2] // 3rd column is pubkey
-        feeRates[pubKey] = thisPeer[1].match(/\((.*)\)/)[1] // 2nd column has fee ppm
+        feeRates[pubKey] = +thisPeer[1].match(/\((.*)\)/)[1] // 2nd column has fee ppm
         return feeRates
       }, {})
     return myFees
@@ -223,13 +244,16 @@ const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toIS
 
 const request = ({}, cbk) => cbk(null, {}, {})
 
+console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
+
 const bos = {
-  getPeers,
+  peers,
   callAPI,
   getFees,
   setFees,
   rebalance,
   reconnect,
-  send
+  send,
+  forwards
 }
 export default bos
