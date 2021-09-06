@@ -1,4 +1,5 @@
 // basic example of a looping bot
+// EXAMPLE ONLY, DO NOT USE
 
 import bos from './bos.js' // my wrappers for bos in bos.js file
 
