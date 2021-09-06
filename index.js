@@ -25,7 +25,7 @@ const bot = async () => {
     peer.localSats = peer.outbound_liquidity || 0
     peer.remoteSats = peer.inbound_liquidity || 0
     peer.totalSats = peer.localSats + peer.remoteSats
-    peer.balance = localSats / totalSats
+    peer.balance = peer.localSats / peer.totalSats
     peer.satsOffBalance = Math.abs(peer.localSats - peer.remoteSats) * 0.5
   }
 
