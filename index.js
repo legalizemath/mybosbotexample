@@ -1,3 +1,4 @@
+```js
 // basic example of a looping bot
 // EXAMPLE ONLY, DO NOT USE
 
@@ -72,6 +73,9 @@ const bot = async () => {
     console.log(result)
   }
 
+  // try reconnecting to disconnected peers
+  await bos.reconnect(true)
+
   // wait 60 minutes
   console.log('sleep time (minutes):', MINUTES_BETWEEN_RUNS)
   await sleep(MINUTES_BETWEEN_RUNS)
@@ -82,3 +86,4 @@ const bot = async () => {
 
 // starts the loop
 bot()
+```
