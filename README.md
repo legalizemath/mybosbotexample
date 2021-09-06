@@ -16,13 +16,27 @@ DO NOT USE AS IS
 
 assumes bos is installed globally and "bos" commands work from anywhere so then just have to run
 
+I used these installation guides
+
+* https://gist.github.com/alexbosworth/8fad3d51f9e1ff67995713edf2d20126
+* https://github.com/alexbosworth/balanceofsatoshis#install
+* https://github.com/alexbosworth/balanceofsatoshis#saved-nodes
+
+Then I created package.json with `"type": "module",` for imports to work
+
+and I run it via
+
+```
+npm link balanceofsatoshis && node index.js
+```
+
+or same via shortcut in this package.json
+
 ```
 npm start
 ```
 
-which will do `npm link balanceofsatoshis && node index.js`
-
-it will link global installation that already exists to the project so it's possible to use it w/o installing new one in node_modules
+it will link global installation that already exists to the project so it's possible to use it w/o installing new one in node_modules & setting up auth again
 
 there's 0 package dependencies except for this link
 
