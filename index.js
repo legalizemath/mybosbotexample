@@ -1,4 +1,3 @@
-```js
 // basic example of a looping bot
 // EXAMPLE ONLY, DO NOT USE
 
@@ -86,4 +85,3 @@ const bot = async () => {
 
 // starts the loop
 bot()
-```
