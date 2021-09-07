@@ -5,15 +5,19 @@ import fs from 'fs'
 import bos from './bos.js'
 
 // time to sleep between trying a bot step again
-const MINUTES_BETWEEN_STEPS = 1
+const MINUTES_BETWEEN_STEPS = 20
 // channels smaller than this not necessary to balance
 const MIN_CHAN_SIZE = 1.9e6
 // channels less off-balance are not necessary to balance
 const MIN_OFF_BALANCE = 0.1
 // limit of sats to balance per attempt
-const MAX_REBALANCE_SATS = 2.1e5
+// (bos one does probing + size up htlc strategy)
+const MAX_REBALANCE_SATS = 4.2e5
+// rebalance with faster keysends after bos rebalance works
+// (faster but higher risk of stuck sats)
+const USE_KEYSENDS_AFTER_BALANCE = true
 // sats to balance via keysends
-// const MAX_REBALANCE_SATS_SEND = 2.1e5
+const MAX_REBALANCE_SATS_SEND = 2.1e5
 // unbalanced sats below this not necessary to balance
 const MIN_REBALANCE_SATS = 0.5e5
 // multiplier for proportional safety ppm range
@@ -23,27 +27,36 @@ const MIN_PPM_FOR_SAFETY = 222
 // never let ppm go above this for fee rate or rebalancing
 const MAX_PPM_ABSOLUTE = 2900
 // adjustment to target rebalance ppm (upward)
-const NUDGE_UP = 0.1
-const NUDGE_DOWN = 0.1 // same, but downward
-const MINUTES_FOR_REBALANCE = 2 // max minutes to spend per rebalance try
-const MAX_BALANCE_REPEATS = Math.ceil(15e6 / 2 / MAX_REBALANCE_SATS) // max repeats to balance if successful
+const NUDGE_UP = 0.33
+// same, but downward
+const NUDGE_DOWN = 0.1
+// max minutes to spend per rebalance try
+const MINUTES_FOR_REBALANCE = 2
+// max minutes to spend per keysend try
+const MINUTES_FOR_SEND = Math.ceil(MINUTES_FOR_REBALANCE / 2)
+// max repeats to balance if successful
+const MAX_BALANCE_REPEATS = 15
+// hours between running bos reconnect
+const HOURS_BETWEEN_RECONNECTS = 2
+// how often to update fees
+const MINUTES_BETWEEN_FEE_CHANGES = 60
+// allow adjusting fees
+const ADJUST_FEES = true
+// how many days of no routing before reduction in fees
+const DAYS_FOR_FEE_REDUCTION = 3
+// how far back to look for routing stats
+const DAYS_FOR_STATS = 7
+// weight for worked values, can be reduced to 1 and removed later
+const WORKED_WEIGHT = 3
 
-const HOURS_BETWEEN_RECONNECTS = 2 // hours between running bos reconnect
-
-const MINUTES_BETWEEN_FEE_CHANGES = 60 // how often to update fees
-const ADJUST_FEES = true // allow adjusting fees
-const DAYS_FOR_FEE_REDUCTION = 3 // how many days of no routing before reduction in fees
-const DAYS_FOR_STATS = 7 // how far back to look for routing stats
-const WORKED_WEIGHT = 3 // weight for worked values, can be reduced to 1 and removed later
-
+// what to weight random selection by
 const WEIGHT_OPTIONS = {
-  // what to weight random selection by
   UNBALANCED_SATS: 'unbalancedSats',
   CHANNEL_SIZE: 'totalSats',
   MY_FEE_RATE: 'my_fee_rate'
 }
-const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS // rnd weight choice
-const USE_KEYSENDS_AFTER_BALANCE = true // rebalance with faster keysends after bos rebalance works
+const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS
+
 const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
 const TIMERS_PATH = 'timers.json'
@@ -194,9 +207,20 @@ const runBotRebalancePeers = async (
     remoteChannel.unbalancedSats,
     localChannel.unbalancedSats
   )
-  const maxAmount = trunc(min(minUnbalanced, MAX_REBALANCE_SATS))
+
+  // true means just regular bos rebalance
+  const doRebalanceInsteadOfKeysend = isFirstRun || !USE_KEYSENDS_AFTER_BALANCE
+
+  const maxAmount = doRebalanceInsteadOfKeysend
+    ? trunc(min(minUnbalanced, MAX_REBALANCE_SATS))
+    : trunc(min(minUnbalanced, MAX_REBALANCE_SATS_SEND))
+
+  const rebalanceTime = doRebalanceInsteadOfKeysend
+    ? MINUTES_FOR_REBALANCE
+    : MINUTES_FOR_SEND
+
   // prettier-ignore
-  console.log(`${getDate()}
+  console.log(`${getDate()} ${rebalanceTime} minutes limit
 
     ☂️  me  ${localChannel.my_fee_rate} ppm  ---|-  ${localChannel.inbound_fee_rate} ppm "${localChannel.alias}" ${localChannel.public_key.slice(0, 10)}
     ${(localChannel.outbound_liquidity/1e6).toFixed(2)}M local sats --> (${(localChannel.inbound_liquidity/1e6).toFixed(2)}M) --> ?
@@ -235,23 +259,22 @@ const runBotRebalancePeers = async (
 
   // do the rebalance
   // switch to keysends if that setting is on && not first run
-  const resBalance =
-    isFirstRun || !USE_KEYSENDS_AFTER_BALANCE
-      ? await bos.rebalance({
-          fromChannel: localChannel.public_key,
-          toChannel: remoteChannel.public_key,
-          maxSats: maxAmount,
-          maxMinutes: MINUTES_FOR_REBALANCE,
-          maxFeeRate
-        })
-      : await bos.send({
-          destination: mynode.my_public_key,
-          fromChannel: localChannel.public_key,
-          toChannel: remoteChannel.public_key,
-          sats: maxAmount,
-          maxMinutes: ceil(MINUTES_FOR_REBALANCE / 2),
-          maxFeeRate
-        })
+  const resBalance = doRebalanceInsteadOfKeysend
+    ? await bos.rebalance({
+        fromChannel: localChannel.public_key,
+        toChannel: remoteChannel.public_key,
+        maxSats: maxAmount,
+        maxMinutes: rebalanceTime,
+        maxFeeRate
+      })
+    : await bos.send({
+        destination: mynode.my_public_key,
+        fromChannel: localChannel.public_key,
+        toChannel: remoteChannel.public_key,
+        sats: maxAmount,
+        maxMinutes: rebalanceTime,
+        maxFeeRate
+      })
 
   // display successful rebalance cost
   if (!resBalance.failed) {
@@ -475,8 +498,8 @@ const updateFees = async () => {
 
     // apply rules if present
     let ppmRule = ppmSafe
-    ppmRule = rule?.min_ppm ? max(rule.min_ppm, ppmRule) : ppmRule
-    ppmRule = rule?.max_ppm ? min(rule.max_ppm, ppmRule) : ppmRule
+    ppmRule = rule?.min_ppm !== undefined ? max(rule.min_ppm, ppmRule) : ppmRule
+    ppmRule = rule?.max_ppm !== undefined ? min(rule.max_ppm, ppmRule) : ppmRule
 
     // put a sane max cap on ppm
     const ppmSane = min(MAX_PPM_ABSOLUTE, ppmRule)
@@ -493,7 +516,7 @@ const updateFees = async () => {
       console.log(`${getDate()} "${peer.alias}" ${peer.public_key.slice(0, 10)} fee rate check:
         rebalancingStats all:     ${JSON.stringify(all)}
         rebalancingStats worked:  ${JSON.stringify(worked)}
-        known rules:              ${JSON.stringify(rule || {})} ${ppmRule !== ppmSafe ? '💥⛔💥' : ''}
+        known rules:              ${JSON.stringify(rule || {})} ${ppmRule !== ppmSafe ? '⛔⛔⛔' : ''}
         days since routing:       ${daysNoRoutingString} (decreases after ${DAYS_FOR_FEE_REDUCTION})
 
         current stats             ${peer.my_fee_rate} ppm [${(peer.outbound_liquidity / 1e6).toFixed(1)}M <--${peer.balance}--> ${(peer.inbound_liquidity / 1e6).toFixed(1)}M] ${peer.inbound_fee_rate} ppm peer
@@ -562,8 +585,6 @@ const updateFees = async () => {
       )
 
       nDecreased++
-
-      // console.log(`${getDate()} fake decrease to ${ppmStep} 🔻🔻🔻🔻🔻\n`)
 
       const resSetFee = await bos.setFees(peer.public_key, ppmStep)
       console.log(
@@ -875,8 +896,6 @@ const initialize = async () => {
   runBot()
 }
 
-// -------------------------- extras ---------------------------
-
 const pretty = n => String(n).replace(/\B(?=(\d{3})+\b)/g, '_')
 
 const getDate = timestamp =>
@@ -890,7 +909,7 @@ const isNotEmpty = obj => !isEmpty(obj)
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
 
-const { min, max, trunc, floor, abs, ceil, random } = Math
+const { min, max, trunc, floor, abs, random } = Math
 
 // returns mean, truncated fractions
 const median = (numbers = [], { obj = false, f = v => v } = {}) => {
