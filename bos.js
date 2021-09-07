@@ -24,7 +24,7 @@ const forwards = async (choices = {}, log = false) => {
     console.boring(`${getDate()} bos.forwards()`)
     const res = await bosGetForwards({
       lnd: (await authenticatedLnd).lnd, // required
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       days: 1,
       // [from: public key]
       // [to: public key]
@@ -51,13 +51,16 @@ const reconnect = async (log = false) => {
   }
 }
 
-const rebalance = async ({
-  fromChannel,
-  toChannel,
-  maxSats = 200000,
-  maxMinutes = 2,
-  maxFeeRate = 100
-}, log = false) => {
+const rebalance = async (
+  {
+    fromChannel,
+    toChannel,
+    maxSats = 200000,
+    maxMinutes = 2,
+    maxFeeRate = 100
+  },
+  log = false
+) => {
   try {
     const options = {
       out_through: fromChannel,
@@ -65,42 +68,55 @@ const rebalance = async ({
       max_rebalance: String(Math.trunc(maxSats)),
       timeout_minutes: Math.trunc(maxMinutes),
       max_fee_rate: Math.trunc(maxFeeRate),
-      max_fee: Math.trunc(maxSats * 0.010000) // unused, 10k ppm
+      max_fee: Math.trunc(maxSats * 0.01) // unused, 10k ppm
     }
-    console.boring(`${getDate()} bos.rebalance()`, log ? JSON.stringify(options) : '')
+    console.boring(
+      `${getDate()} bos.rebalance()`,
+      log ? JSON.stringify(options) : ''
+    )
     const res = await bosRebalance({
       ...options,
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd, // required
-      logger: { info: v => log ? console.log(getDate(),v) : process.stdout.write('.') },
+      logger: {
+        info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
+      },
       avoid: [], // seems necessary
       out_channels: [] // seems necessary
     })
-    log && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
+    log &&
+      console.log(
+        `\n${getDate()} bos.rebalance() success:`,
+        JSON.stringify(res)
+      )
     console.log('')
     return {
-      fee_rate: +(res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1]),
-      rebalanced: Math.trunc(+(res.rebalance[2]?.rebalanced) * 1e8)
+      fee_rate: +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1],
+      rebalanced: Math.trunc(+res.rebalance[2]?.rebalanced * 1e8)
     }
   } catch (e) {
     console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
     // provide suggested ppm if possible
     return {
       failed: true,
-      ppmSuggested: e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
+      ppmSuggested:
+        e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
       msg: e
     }
   }
 }
 
-const send = async ({
-  destination,
-  fromChannel,
-  toChannel,
-  sats = 1,
-  maxMinutes = 1,
-  maxFeeRate = 100
-}, log = false) => {
+const send = async (
+  {
+    destination,
+    fromChannel,
+    toChannel,
+    sats = 1,
+    maxMinutes = 1,
+    maxFeeRate = 100
+  },
+  log = false
+) => {
   const options = {
     amount: String(Math.trunc(sats)),
     destination,
@@ -112,22 +128,26 @@ const send = async ({
     timeout_minutes: Math.trunc(maxMinutes)
   }
   try {
-    console.boring(`${getDate()} bos.send()`, log ? JSON.stringify(options) : '')
+    console.boring(
+      `${getDate()} bos.send() to ${destination}`,
+      log ? JSON.stringify(options) : ''
+    )
     const res = await bosPushPayment({
       ...options,
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd,
       logger: {
-        info: v => log ? console.log(getDate(), v) : process.stdout.write('.')
+        info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
       },
       is_dry_run: false,
       quiz_answers: [],
       request
     })
-    log && console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
+    log &&
+      console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
     console.log('')
     return {
-      fee_rate: Math.trunc(1.0 * +res.fee / +res.paid * 1e6),
+      fee_rate: Math.trunc(((1.0 * +res.fee) / +res.paid) * 1e6),
       rebalanced: Math.trunc(+res.paid - +res.fee)
     }
   } catch (e) {
@@ -136,11 +156,10 @@ const send = async ({
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
     return {
       failed: true,
-      ppmSuggested: e[1] === 'MaxFeeLimitTooLow'
-      ? (
-        Math.trunc(1.0 * +e[2].needed_fee / sats * 1e6 + 1.0)
-      )
-      : null,
+      ppmSuggested:
+        e[1] === 'MaxFeeLimitTooLow'
+          ? Math.trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0)
+          : null,
       msg: e
     }
   }
@@ -151,21 +170,21 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
   try {
     console.boring(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd,
       logger: {}, // logger not used
       to: [peerPubKey], // array of pubkeys to adjust fees towards
       fee_rate: String(fee_rate) // pm rate to set
     })
     const newFee = res.rows[1][1]?.match(/\((.*)\)/)[1]
-    log && console.log(`${getDate()} bos.setFees()`, JSON.stringify(res), newFee)
+    log &&
+      console.log(`${getDate()} bos.setFees()`, JSON.stringify(res), newFee)
     return +newFee
-  } catch(e) {
+  } catch (e) {
     console.error(`${getDate()} bos.setFees() aborted:`, e)
     return {}
   }
 }
-
 
 // bos call api commands to lnd
 // bos call getIdentity - get my pub key
@@ -181,11 +200,11 @@ const callAPI = async (method, choices = {}) => {
     return await callRawApi({
       lnd: (await authenticatedLnd).lnd,
       method,
-      ask: (undefined, cbk) => cbk(null, choices),
+      ask: (u, cbk) => cbk(null, choices)
     })
   } catch (e) {
     console.error(`${getDate()} bos.callAPI() aborted:`, e)
-    return undefined;
+    return undefined
   }
 }
 
@@ -193,7 +212,7 @@ const peers = async (choices = {}, log = false) => {
   try {
     console.boring(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd,
       omit: [], // required
       active: true, // only connected peers
@@ -202,13 +221,14 @@ const peers = async (choices = {}, log = false) => {
     })
     const peers = res.peers
 
-    // convert fee rate to just ppm
-    .map(peer => ({
-      ...peer,
-      inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1] || 0
-    }))
+      // convert fee rate to just ppm
+      .map(peer => ({
+        ...peer,
+        inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1] || 0
+      }))
 
-    log && console.boring(`${getDate()} bos.peers()`, JSON.stringify(peers, (k, v) => v === undefined ? 'undefined' : v, 2))
+    log &&
+      console.log(`${getDate()} bos.peers()`, JSON.stringify(peers, fixJSON, 2))
     return peers
   } catch (e) {
     console.error(`${getDate()} bos.peers() aborted:`, e)
@@ -221,28 +241,40 @@ const getFees = async (log = false) => {
   try {
     console.boring(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
-      fs: {getFile: readFile}, // required
+      fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd,
       logger: {}, // logger not used
       to: [] // array of pubkeys to adjust fees towards
     })
+    log &&
+      console.log(
+        `${getDate()} bos.getFees() result:`,
+        JSON.stringify(res, fixJSON, 2)
+      )
+
     const myFees = res.rows
       .slice(1) // remove table headers row
       .reduce((feeRates, thisPeer) => {
-        const pubKey = thisPeer[2] // 3rd column is pubkey
-        feeRates[pubKey] = +thisPeer[1].match(/\((.*)\)/)[1] // 2nd column has fee ppm
+        // 3rd column is pubkey
+        const pubKey = thisPeer[2]
+        // 2nd column has fee ppm
+        feeRates[pubKey] = +thisPeer[1].match(/\((.*)\)/)[1]
         return feeRates
       }, {})
+
     return myFees
-  } catch(e) {
+  } catch (e) {
     console.error(`${getDate()} bos.getFees() aborted:`, e)
     return undefined
   }
 }
 
-const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
+const getDate = timestamp =>
+  (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
-const request = ({}, cbk) => cbk(null, {}, {})
+const request = (o, cbk) => cbk(null, {}, {})
+
+const fixJSON = (k, v) => (v === undefined ? null : v)
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
 
