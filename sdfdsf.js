@@ -1,3 +1,6 @@
+// NOT SAFE TO RUN
+dfgdfgdfgdfgdfg
+
 import fs from 'fs'
 import bos from './bos.js'
 
