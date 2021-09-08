@@ -57,7 +57,8 @@ const rebalance = async (
     toChannel,
     maxSats = 200000,
     maxMinutes = 2,
-    maxFeeRate = 100
+    maxFeeRate = 100,
+    avoid = []
   },
   log = false
 ) => {
@@ -68,21 +69,21 @@ const rebalance = async (
       max_rebalance: String(Math.trunc(maxSats)),
       timeout_minutes: Math.trunc(maxMinutes),
       max_fee_rate: Math.trunc(maxFeeRate),
-      max_fee: Math.trunc(maxSats * 0.01) // unused, 10k ppm
+      max_fee: Math.trunc(maxSats * 0.01), // unused, 10k ppm
+      avoid
     }
     console.boring(
       `${getDate()} bos.rebalance()`,
       log ? JSON.stringify(options) : ''
     )
     const res = await bosRebalance({
-      ...options,
       fs: { getFile: readFile }, // required
       lnd: (await authenticatedLnd).lnd, // required
       logger: {
         info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
       },
-      avoid: [], // seems necessary
-      out_channels: [] // seems necessary
+      out_channels: [], // seems necessary
+      ...options
     })
     log &&
       console.log(
@@ -108,24 +109,25 @@ const rebalance = async (
 
 const send = async (
   {
-    destination,
-    fromChannel,
-    toChannel,
+    destination, // public key
+    fromChannel, // public key
+    toChannel, // public key
     sats = 1,
     maxMinutes = 1,
     maxFeeRate = 100
   },
-  log = false
+  log = false,
+  retry = false
 ) => {
   const options = {
-    amount: String(Math.trunc(sats)),
     destination,
     out_through: fromChannel,
     in_through: toChannel,
+    amount: String(Math.trunc(sats)),
+    timeout_minutes: Math.trunc(maxMinutes),
     // uses max fee (sats) only so calculated from max fee rate (ppm)
-    max_fee: Math.trunc(sats * maxFeeRate * 1e-6 + 1),
+    max_fee: Math.trunc(sats * maxFeeRate * 1e-6 + 1)
     // message: '',
-    timeout_minutes: Math.trunc(maxMinutes)
   }
   try {
     console.boring(
@@ -154,6 +156,25 @@ const send = async (
     console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
+
+    // if higher fee was JUST found try just 1 more time
+    if (!retry && e[1] === 'FeeInsufficient') {
+      console.error(
+        `\n${getDate()} retrying just once after FeeInsufficient error`
+      )
+      return await send(
+        {
+          destination,
+          fromChannel,
+          toChannel,
+          sats,
+          maxMinutes,
+          maxFeeRate
+        },
+        log,
+        true
+      )
+    }
     return {
       failed: true,
       ppmSuggested:
