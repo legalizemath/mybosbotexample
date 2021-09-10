@@ -1,14 +1,24 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   linked via `npm link balanceofsatoshis`
-  Used with bos v10.10.2
+  Used with bos v10.13.1
 */
 
-import { callRawApi } from 'balanceofsatoshis/commands/index.js'
-import { adjustFees as bosAdjustFees } from 'balanceofsatoshis/routing/index.js'
-import { rebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
+import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
+import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
 import lnd from 'balanceofsatoshis/lnd/index.js'
+
+import {
+  adjustFees as bosAdjustFees,
+  getFeesChart as bosGetFeesChart,
+  getChainFeesChart as bosGetChainFeesChart,
+  getFeesPaid as bosGetFeesPaid
+} from 'balanceofsatoshis/routing/index.js'
+
+// import { rebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
+import { manageRebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
+
 import {
   pushPayment as bosPushPayment,
   reconnect as bosReconnect,
@@ -17,13 +27,82 @@ import {
 } from 'balanceofsatoshis/network/index.js'
 
 // use existing global bos authentication
-const authenticatedLnd = lnd.authenticatedLnd({})
+const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
+
+// returns {description, title, data: []}
+const getFeesPaid = async (choices = {}, log = false) => {
+  try {
+    console.boring(`${getDate()} bos.getFeesPaid()`)
+    const res = await bosGetFeesPaid({
+      lnds: [await mylnd()], // required
+      days: 30,
+      // is_most_forwarded_table: // ?
+      // is_most_fees_table: // ?
+      // is_network: // ?
+      // is_peer: // ?
+      ...choices
+    })
+    log && console.log(`${getDate()} bos.getFeesPaid() complete`, res)
+    return res
+  } catch (e) {
+    console.error(
+      `\n${getDate()} bos.getFeesPaid() aborted:`,
+      JSON.stringify(e)
+    )
+    return {}
+  }
+}
+
+// returns {description, title, data: []}
+const getFeesChart = async (choices = {}, log = false) => {
+  try {
+    console.boring(`${getDate()} bos.getFeesChart()`)
+    const res = await bosGetFeesChart({
+      lnds: [await mylnd()], // required
+      days: 30,
+      is_count: false,
+      is_forwarded: false,
+      // via: <public key>
+      ...choices
+    })
+    log && console.log(`${getDate()} bos.getFeesChart() complete`, res)
+    return res
+  } catch (e) {
+    console.error(
+      `\n${getDate()} bos.getFeesChart() aborted:`,
+      JSON.stringify(e)
+    )
+    return {}
+  }
+}
+
+// returns {description, title, data: []}
+const getChainFeesChart = async (choices = {}, log = false) => {
+  try {
+    console.boring(`${getDate()} bos.getChainFeesChart()`)
+    const res = await bosGetChainFeesChart({
+      lnds: [await mylnd()], // required
+      days: 30,
+      is_monochrome: true,
+      request,
+      ...choices
+    })
+    log && console.log(`${getDate()} bos.getChainFeesChart() complete`, res)
+    return res
+  } catch (e) {
+    console.error(
+      `\n${getDate()} bos.getChainFeesChart() aborted:`,
+      JSON.stringify(e)
+    )
+    return {}
+  }
+}
 
 const forwards = async (choices = {}, log = false) => {
   try {
     console.boring(`${getDate()} bos.forwards()`)
     const res = await bosGetForwards({
-      lnd: (await authenticatedLnd).lnd, // required
+      lnd: await mylnd(), // required
       fs: { getFile: readFile }, // required
       days: 1,
       // [from: public key]
@@ -42,7 +121,7 @@ const reconnect = async (log = false) => {
   try {
     console.boring(`${getDate()} bos.reconnect()`)
     const res = await bosReconnect({
-      lnd: (await authenticatedLnd).lnd
+      lnd: await mylnd()
     })
     log && console.log(`${getDate()} bos.reconnect() complete`, res)
     return res
@@ -57,12 +136,13 @@ const rebalance = async (
     toChannel,
     maxSats = 200000,
     maxMinutes = 2,
-    maxFeeRate = 100,
-    avoid = []
+    maxFeeRate = 100
   },
+  choices = {},
   log = false
 ) => {
   try {
+    // change to internal key names, add overwrites in choices
     const options = {
       out_through: fromChannel,
       in_through: toChannel,
@@ -70,7 +150,11 @@ const rebalance = async (
       timeout_minutes: Math.trunc(maxMinutes),
       max_fee_rate: Math.trunc(maxFeeRate),
       max_fee: Math.trunc(maxSats * 0.01), // unused, 10k ppm
-      avoid
+      avoid: [], // necessary
+      // out_channels: [],
+      // in_outound: undefined,
+      // out_inbound: undefined,
+      ...choices
     }
     console.boring(
       `${getDate()} bos.rebalance()`,
@@ -78,10 +162,8 @@ const rebalance = async (
     )
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
-      lnd: (await authenticatedLnd).lnd, // required
-      logger: {
-        info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
-      },
+      lnd: await mylnd(), // required
+      logger: logger(log),
       out_channels: [], // seems necessary
       ...options
     })
@@ -109,9 +191,9 @@ const rebalance = async (
 
 const send = async (
   {
-    destination, // public key
-    fromChannel, // public key
-    toChannel, // public key
+    destination, // public key, kind of important
+    fromChannel = undefined, // public key
+    toChannel = undefined, // public key
     sats = 1,
     maxMinutes = 1,
     maxFeeRate = 100
@@ -135,15 +217,14 @@ const send = async (
       log ? JSON.stringify(options) : ''
     )
     const res = await bosPushPayment({
-      ...options,
+      lnd: await mylnd(),
+      logger: logger(log),
       fs: { getFile: readFile }, // required
-      lnd: (await authenticatedLnd).lnd,
-      logger: {
-        info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
-      },
-      is_dry_run: false,
-      quiz_answers: [],
-      request
+      avoid: [], // required
+      is_dry_run: false, // required
+      quiz_answers: [], // required
+      request,
+      ...options
     })
     log &&
       console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
@@ -192,7 +273,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
     console.boring(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
-      lnd: (await authenticatedLnd).lnd,
+      lnd: await mylnd(),
       logger: {}, // logger not used
       to: [peerPubKey], // array of pubkeys to adjust fees towards
       fee_rate: String(fee_rate) // pm rate to set
@@ -219,7 +300,7 @@ const callAPI = async (method, choices = {}) => {
   try {
     console.boring(`${getDate()} bos.callAPI() for ${method}`)
     return await callRawApi({
-      lnd: (await authenticatedLnd).lnd,
+      lnd: await mylnd(),
       method,
       ask: (u, cbk) => cbk(null, choices)
     })
@@ -234,10 +315,11 @@ const peers = async (choices = {}, log = false) => {
     console.boring(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
       fs: { getFile: readFile }, // required
-      lnd: (await authenticatedLnd).lnd,
+      lnd: await mylnd(),
       omit: [], // required
       active: true, // only connected peers
       public: true, // only public peers
+      earnings_days: 3, // can comment this out
       ...choices
     })
     const peers = res.peers
@@ -263,7 +345,7 @@ const getFees = async (log = false) => {
     console.boring(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
-      lnd: (await authenticatedLnd).lnd,
+      lnd: await mylnd(),
       logger: {}, // logger not used
       to: [] // array of pubkeys to adjust fees towards
     })
@@ -293,9 +375,14 @@ const getFees = async (log = false) => {
 const getDate = timestamp =>
   (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
-const request = (o, cbk) => cbk(null, {}, {})
+// const request = (o, cbk) => cbk(null, {}, {})
+const request = fetchRequest({ fetch })
 
 const fixJSON = (k, v) => (v === undefined ? null : v)
+
+const logger = log => ({
+  info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
+})
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
 
@@ -307,6 +394,9 @@ const bos = {
   rebalance,
   reconnect,
   send,
-  forwards
+  forwards,
+  getFeesChart,
+  getChainFeesChart,
+  getFeesPaid
 }
 export default bos
