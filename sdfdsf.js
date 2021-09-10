@@ -32,9 +32,9 @@ const MIN_PPM_FOR_SAFETY = 222
 // never let ppm go above this for fee rate or rebalancing
 const MAX_PPM_ABSOLUTE = 2992
 // max size of fee adjustment to target ppm (upward)
-const NUDGE_UP = 0.2
+const NUDGE_UP = 0.1
 // max size of fee adjustment to target ppm (downward)
-const NUDGE_DOWN = 0.1
+const NUDGE_DOWN = 0.05
 // max minutes to spend per rebalance try
 const MINUTES_FOR_REBALANCE = 3
 // max minutes to spend per keysend try
@@ -62,7 +62,7 @@ const WORKED_WEIGHT = 2
 const WEIGHT_OPTIONS = {
   // 2x more sats from balance is 2x more likely to be selected
   UNBALANCED_SATS: peer => peer.unbalancedSats,
-  // 2x more sats from balance is >1x & <2x more likely to be selected
+  // 2x more sats from balance is ~1.4x more likely to be selected
   // better for trying more channel combinations still favoring unabalanced
   UNBALANCED_SATS_SQRT: peer => trunc(sqrt(peer.unbalancedSats)),
   UNBALANCED_SATS_SQRTSQRT: peer => trunc(sqrt(sqrt(peer.unbalancedSats))),
@@ -74,6 +74,7 @@ const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS_SQRTSQRT
 const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
 const TIMERS_PATH = 'timers.json'
+const SETTINGS_PATH = 'settings.json'
 
 // global node info
 const mynode = {
@@ -180,12 +181,8 @@ const findGoodPeer = async ({ localChannel, remoteChannel }) => {
     // find full info peer info based on recorded public key
     const candidate_public_key = attempt.peer
     const peer = peers.find(p => p.public_key === candidate_public_key)
-    if (!peer) {
-      console.error(
-        `${getDate()} shouldn't happen: no peer found w/ public key of ${candidate_public_key}`
-      )
-      continue
-    }
+    // no current peer found w/ this attemp's public key
+    if (!peer) continue
     const goodMatch =
       // has to be different peer from localChannel before
       candidate_public_key !== localChannel.public_key &&
@@ -371,17 +368,32 @@ const runBotRebalancePeers = async (
   `)
 
   // Always lose money rebalancing remote heavy channel with fee rate lower than remote fee rate
-  if (
-    remoteChannel.my_fee_rate * SAFETY_MARGIN <
-    remoteChannel.inbound_fee_rate
-  ) {
+  if (maxFeeRate < remoteChannel.inbound_fee_rate) {
+    const minimumAcceptable =
+      max(
+        remoteChannel.inbound_fee_rate * SAFETY_MARGIN,
+        remoteChannel.inbound_fee_rate + MIN_PPM_FOR_SAFETY
+      ) + 1
     console.log(`${getDate()}
-      Attempted balancing aborted (too expensive)
-      Fee rate (${remoteChannel.my_fee_rate} ppm) to remote-heavy "${
-      remoteChannel.alias
-    }"
-      was smaller than theirs at ${remoteChannel.inbound_fee_rate} ppm
+      Attempted balancing aborted at max of ${maxFeeRate}
+        Remote-heavy "${remoteChannel.alias}" channel peer has higher
+        incoming fee rate of ${remoteChannel.inbound_fee_rate} ppm.
+        My fee rate should be at least ${minimumAcceptable.toFixed(
+          0
+        )} to justify it.
     `)
+    appendRecord({
+      peer: remoteChannel,
+      newRebalance: {
+        t: Date.now(),
+        ppm: minimumAcceptable,
+        failed: true,
+        peer: localChannel.public_key,
+        peerAlias: localChannel.alias,
+        sats: maxAmount,
+        belowPeer: true // unique flag for this
+      }
+    })
     return { failed: true }
   }
 
@@ -471,7 +483,7 @@ const runBotReconnectCheck = async () => {
       ` Last run: ${
         lastReconnect === 0
           ? 'never'
-          : `${minutesSince}h ago at ${getDate(lastReconnect)}`
+          : `${minutesSince}m ago at ${getDate(lastReconnect)}`
       }`
   )
   if (isTimeForReconnect) {
@@ -1023,6 +1035,14 @@ const generateSnapshots = async () => {
     { f: pretty }
   )
 
+  const totalPeersRoutingIn = getForwards.filter(
+    peer => peer.last_inbound_at
+  ).length
+
+  const totalPeersRoutingOut = getForwards.filter(
+    peer => peer.last_outbound_at
+  ).length
+
   // const earnedSummary = await bos.getFeesChart({ days: DAYS_FOR_STATS })
   const countsSummary = await bos.getFeesChart({
     days: DAYS_FOR_STATS,
@@ -1041,23 +1061,31 @@ const generateSnapshots = async () => {
   const totalFeesPaid = paidFeesSummary.data.reduce((t, v) => t + v, 0)
 
   const totalProfit = totalEarnedFromForwards - totalChainFees - totalFeesPaid
-  // console.log({ countsSummary, tokensSummary })
+
+  const balances = await bos.getDetailedBalance()
+  console.log(balances)
 
   // prettier-ignore
   console.log(`${getDate()}
 
   NODE SUMMARY:
 
-    total peers:                      ${peers.length} sats
-    total local:                      ${pretty(totalLocalSats)} sats
-    total remote:                     ${pretty(totalRemoteSats)} sats
-    total unsettled:                  ${pretty(totalUnsettledSats)} sats
+    total peers:                      ${peers.length}
+
+    off-chain local available:        ${pretty(totalLocalSats)} sats
+    off-chain remote available:       ${pretty(totalRemoteSats)} sats
+    off-chain total:                  ${pretty(balances.offchain_balance * 1e8)} sats
+    off-chain unsettled:              ${pretty(totalUnsettledSats)} sats
+    off-chain pending                 ${pretty(balances.offchain_pending * 1e8)} sats
+
+    on-chain closing:                 ${pretty(balances.closing_balance * 1e8)} sats
+    on-chain total:                   ${pretty(balances.onchain_balance * 1e8)} sats
   -------------------------------------------------------------
     my base fee stats:                ${baseFeesStats} msats
     my proportional fee stats:        ${ppmFeesStats} ppm
-    my channel capacity stats:        ${channelCapacityStats}
+    my channel capacity stats:        ${channelCapacityStats} sats
   -------------------------------------------------------------
-    (For ${DAYS_FOR_STATS} days)
+    (Per last ${DAYS_FOR_STATS} days)
 
     total earned:                     ${pretty(totalEarnedFromForwards)} sats
     total on-chain fees:              ${pretty(totalChainFees)} sats
@@ -1067,28 +1095,32 @@ const generateSnapshots = async () => {
 
     total forwarded:                  ${pretty(totalRouted)} sats
     number of tx forwarded:           ${totalForwardsCount}
-    avg forward size:                 ${trunc(totalRouted / totalForwardsCount)} sats
-    earned per peer stats:            ${statsEarnedPerPeer}
+    avg forward size:                 ${pretty(totalRouted / totalForwardsCount)} sats
+    peers used for routing-out:       ${totalPeersRoutingOut}
+    peers used for routing-in:        ${totalPeersRoutingIn}
+    earned per peer stats:            ${statsEarnedPerPeer} sats
 
-    % routed                          ${trunc(totalRouted / totalLocalSats * 100)}
-    avg forwarded ppm:                ${trunc(totalEarnedFromForwards / totalRouted * 1e6)} ppm
+    % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}
+    avg forwarded ppm:                ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
     avg profit ppm:                   ${(totalProfit / totalLocalSats * 1e6).toFixed(0)} ppm
-    annual ROI:                       ${(totalProfit / DAYS_FOR_STATS * 365 / totalLocalSats * 100).toFixed(3)} %
+    est. annual ROI:                  ${(totalProfit / DAYS_FOR_STATS * 365.25 / totalLocalSats * 100).toFixed(3)} %
+    est. annual profit:               ${pretty(totalProfit / DAYS_FOR_STATS * 365.25)} sats
   -------------------------------------------------------------
-    total unbalanced sats percent:    ${unbalancedPercent}%
     total unbalanced local:           ${pretty(totalLocalSatsOffBalance)} sats
     total unbalanced remote:          ${pretty(abs(totalRemoteSatsOffBalance))} sats
-    total unbalanced:                 ${pretty(totalSatsOffBalanceSigned)} sats
+    total unbalanced:                 ${pretty(totalSatsOffBalance)} sats
+    total unbalanced sats percent:    ${unbalancedPercent}%
+    net unbalanced:                   ${pretty(totalSatsOffBalanceSigned)} sats
     ${
       totalSatsOffBalanceSigned > MIN_REBALANCE_SATS
-        ? '  lower on inbound liquidity, get/rent others to open channels to you' +
-          ' or loop-out/boltz/muun/WoS LN to on-chain funds'
+        ? '  (lower on inbound liquidity, get/rent others to open channels to you' +
+          ' or loop-out/boltz/muun/WoS LN to on-chain funds)'
         : ''
     }
     ${
       totalSatsOffBalanceSigned < MIN_REBALANCE_SATS
-        ? '  lower on local sats, so open channels to increase local or reduce' +
-          ' amount of remote via loop-in or opening channel to sinks like LOOP'
+        ? '  (lower on local sats, so open channels to increase local or reduce' +
+          ' amount of remote via loop-in or opening channel to sinks like LOOP)'
         : ''
     }
   `)
@@ -1129,12 +1161,34 @@ const initialize = async () => {
   if (!getIdentity.public_key || getIdentity.public_key.length < 10)
     throw 'no pubkey'
   mynode.my_public_key = getIdentity.public_key
+
+  const feeUpdatesPerDay = floor((60 * 24) / MINUTES_BETWEEN_FEE_CHANGES)
+
+  const updateNudge = (now, nudge, target) => now * (1 - nudge) + target * nudge
+
+  const maxUpFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(
+    f => updateNudge(f, NUDGE_UP, 100),
+    0
+  )
+  const maxDownFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(
+    f => updateNudge(f, NUDGE_DOWN, 100),
+    0
+  )
+
   console.log(`${getDate()}
   ========================================================
 
-    this node's public key is
+    this node's public key:
 
       "${mynode.my_public_key}"
+
+    max fee rate change per day is
+
+      up:   ${maxUpFeeChangePerDay.toFixed(1)} % towards set point
+
+      down: ${maxDownFeeChangePerDay.toFixed(1)} % towards set point
+        (if no routing-out for ${DAYS_FOR_FEE_REDUCTION} days)
+
 
     IF THIS IS INCORRECT, ctrl + c
 
@@ -1147,9 +1201,9 @@ const initialize = async () => {
   if (!fs.existsSync(SNAPSHOTS_PATH))
     fs.mkdirSync(SNAPSHOTS_PATH, { recursive: true })
 
-  // load settings.json
-  if (fs.existsSync('settings.json')) {
-    mynode.settings = JSON.parse(fs.readFileSync('settings.json'))
+  // load settings file
+  if (fs.existsSync(SETTINGS_PATH)) {
+    mynode.settings = JSON.parse(fs.readFileSync(SETTINGS_PATH))
   }
 
   // generate timers file if there's not one
@@ -1173,7 +1227,7 @@ const initialize = async () => {
   runBot()
 }
 
-const pretty = n => String(n).replace(/\B(?=(\d{3})+\b)/g, '_')
+const pretty = n => String(trunc(n)).replace(/\B(?=(\d{3})+\b)/g, '_')
 
 const getDate = timestamp =>
   (timestamp ? new Date(timestamp) : new Date()).toISOString()
@@ -1196,7 +1250,7 @@ const median = (numbers = [], { obj = false, f = v => v } = {}) => {
     .sort((a, b) => a - b)
   const n = sorted.length
   if (!numbers || numbers.length === 0 || n === 0)
-    return !obj ? '{"n":0}' : { n: 0 }
+    return !obj ? 'n: 0' : { n: 0 }
   const middle = floor(sorted.length * 0.5)
   const middleTop = floor(sorted.length * 0.75)
   const middleBottom = floor(sorted.length * 0.25)
@@ -1223,7 +1277,14 @@ const median = (numbers = [], { obj = false, f = v => v } = {}) => {
     top: f(sorted[numbers.length - 1])
   }
 
-  return !obj ? JSON.stringify(result, fixJSON) : result
+  const { bottom, bottom25, median, avg, top75, top } = result
+
+  // const stringOutput = JSON.stringify(result, fixJSON)
+  const stringOutput =
+    `(n: ${n}) min: ${bottom}, 1/4th: ${bottom25}, ` +
+    `median: ${median}, avg: ${avg}, 3/4th: ${top75}, max: ${top}`
+
+  return !obj ? stringOutput : result
 }
 
 initialize()
