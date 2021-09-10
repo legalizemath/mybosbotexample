@@ -34,7 +34,7 @@ const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 // returns {closing_balance, offchain_balance, offchain_pending, onchain_balance, onchain_vbytes}
 const getDetailedBalance = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.getDetailedBalance()`)
+    log && console.boring(`${getDate()} bos.getDetailedBalance()`)
     const res = await bosGetDetailedBalance({
       lnd: await mylnd(), // required
       ...choices
@@ -63,7 +63,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesPaid = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.getFeesPaid()`)
+    log && console.boring(`${getDate()} bos.getFeesPaid()`)
     const res = await bosGetFeesPaid({
       lnds: [await mylnd()], // required
       days: 30,
@@ -87,7 +87,7 @@ const getFeesPaid = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesChart = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.getFeesChart()`)
+    log && console.boring(`${getDate()} bos.getFeesChart()`)
     const res = await bosGetFeesChart({
       lnds: [await mylnd()], // required
       days: 30,
@@ -110,7 +110,7 @@ const getFeesChart = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getChainFeesChart = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.getChainFeesChart()`)
+    log && console.boring(`${getDate()} bos.getChainFeesChart()`)
     const res = await bosGetChainFeesChart({
       lnds: [await mylnd()], // required
       days: 30,
@@ -131,7 +131,7 @@ const getChainFeesChart = async (choices = {}, log = false) => {
 
 const forwards = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.forwards()`)
+    log && console.boring(`${getDate()} bos.forwards()`)
     const res = await bosGetForwards({
       lnd: await mylnd(), // required
       fs: { getFile: readFile }, // required
@@ -150,7 +150,7 @@ const forwards = async (choices = {}, log = false) => {
 
 const reconnect = async (log = false) => {
   try {
-    console.boring(`${getDate()} bos.reconnect()`)
+    log && console.boring(`${getDate()} bos.reconnect()`)
     const res = await bosReconnect({
       lnd: await mylnd()
     })
@@ -187,10 +187,11 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    console.boring(
-      `${getDate()} bos.rebalance()`,
-      log ? JSON.stringify(options) : ''
-    )
+    log &&
+      console.boring(
+        `${getDate()} bos.rebalance()`,
+        log ? JSON.stringify(options) : ''
+      )
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(), // required
@@ -243,10 +244,11 @@ const send = async (
     // message: '',
   }
   try {
-    console.boring(
-      `${getDate()} bos.send() to ${destination}`,
-      log ? JSON.stringify(options) : ''
-    )
+    log &&
+      console.boring(
+        `${getDate()} bos.send() to ${destination}`,
+        log ? JSON.stringify(options) : ''
+      )
     const res = await bosPushPayment({
       lnd: await mylnd(),
       logger: logger(log),
@@ -301,7 +303,7 @@ const send = async (
 // returns new set fee
 const setFees = async (peerPubKey, fee_rate, log = false) => {
   try {
-    console.boring(`${getDate()} bos.setFees()`)
+    log && console.boring(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(),
@@ -326,9 +328,9 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // bos call getForwards - forwarding events, choices: either {limit: 5} or {token: `{"offset":10,"limit":5}`}
 // names for methods and choices for arguments via `bos call` or here
 // https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
-const callAPI = async (method, choices = {}) => {
+const callAPI = async (method, choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.callAPI() for ${method}`)
+    log && console.boring(`${getDate()} bos.callAPI() for ${method}`)
     return await callRawApi({
       lnd: await mylnd(),
       method,
@@ -342,14 +344,14 @@ const callAPI = async (method, choices = {}) => {
 
 const peers = async (choices = {}, log = false) => {
   try {
-    console.boring(`${getDate()} bos.peers()`)
+    log && console.boring(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(),
       omit: [], // required
       active: true, // only connected peers
       public: true, // only public peers
-      earnings_days: 3, // can comment this out
+      // earnings_days: 7, // can comment this out
       ...choices
     })
     const peers = res.peers
@@ -372,7 +374,7 @@ const peers = async (choices = {}, log = false) => {
 // returns {pubkey: my_ppm_fee_rate}
 const getFees = async (log = false) => {
   try {
-    console.boring(`${getDate()} bos.getFees()`)
+    log && console.boring(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(),
@@ -424,10 +426,13 @@ const getFees = async (log = false) => {
 */
 
 const customGetForwardingEvents = async ({
-  days = 1,
-  timeArray = false,
-  max_minutes_search = 1
+  days = 1, // how many days ago to look back
+  byInPeer = false, // use in-peers as keys instead of out-peers
+  timeArray = false, // return as array of time points instead of object
+  max_minutes_search = 1 // safety if takes too long
 } = {}) => {
+  console.boring(`${getDate()} bos.customGetForwardingEvents()`)
+
   let started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
 
@@ -450,7 +455,7 @@ const customGetForwardingEvents = async ({
       token: `{"offset":${pageSize * page++},"limit":${pageSize}}`
     })
 
-    const forwards = res.forwards || [] // old to new
+    const forwards = res.forwards || [] // new to old
 
     if (forwards.length === 0) break // done
     if (!isRecent(forwards[0].created_at)) continue // page too old
@@ -467,13 +472,21 @@ const customGetForwardingEvents = async ({
       routed.created_at_ms = Date.parse(routed.created_at)
       routed.outgoing_peer = outPeer
       routed.incoming_peer = inPeer
-      routed.fee_mtokens = +routed.fee_mtokens
+      routed.fee_mtokens = +routed.fee_mtokens || 0
       routed.mtokens = +routed.mtokens
 
-      if (byPeer[outPeer]) byPeer[outPeer].push(routed)
-      else byPeer[outPeer] = [routed]
+      if (timeArray) {
+        byTime.push(routed)
+        continue
+      }
 
-      byTime.push(routed)
+      if (!byInPeer) {
+        if (byPeer[outPeer]) byPeer[outPeer].push(routed)
+        else byPeer[outPeer] = [routed]
+      } else {
+        if (byPeer[inPeer]) byPeer[inPeer].push(routed)
+        else byPeer[inPeer] = [routed]
+      }
     }
   }
 
