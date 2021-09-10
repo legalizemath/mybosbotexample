@@ -41,11 +41,9 @@ const getDetailedBalance = async (choices = {}, log = false) => {
     })
     log && console.log(`${getDate()} bos.getDetailedBalance() complete`, res)
 
-    const stylingPatterns =
-      // eslint-disable-next-line no-control-regex
-      /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
     return JSON.parse(
       JSON.stringify(res, (k, v) =>
+        // removing styling so can get numbers directly & replacing unknown with 0
         typeof v === 'string'
           ? v.replace(stylingPatterns, '')
           : v === undefined
@@ -407,7 +405,8 @@ const getFees = async (log = false) => {
 // ---- I needed this
 
 // does calls bos call getChannels and bos call getForwards
-// and returns {byPeer: {[public_key]: [forwards]}, byTime: [forwards]}
+// and returns by peer: {[public_keys]: [forwards]}
+// or by time: [forwards]
 // forwards look like:
 /*
 {
@@ -426,7 +425,8 @@ const getFees = async (log = false) => {
 
 const customGetForwardingEvents = async ({
   days = 1,
-  max_minutes = 1
+  timeArray = false,
+  max_minutes_search = 1
 } = {}) => {
   let started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
@@ -444,7 +444,7 @@ const customGetForwardingEvents = async ({
     idToPublicKey[channel.id] = channel.partner_public_key
   })
 
-  while (Date.now() - started < max_minutes * 60 * 1000) {
+  while (Date.now() - started < max_minutes_search * 60 * 1000) {
     // get newer events
     const res = await callAPI('getForwards', {
       token: `{"offset":${pageSize * page++},"limit":${pageSize}}`
@@ -477,7 +477,8 @@ const customGetForwardingEvents = async ({
     }
   }
 
-  return { byPeer, byTime }
+  if (!timeArray) return byPeer
+  return byTime
 }
 
 const getDate = timestamp =>
@@ -493,6 +494,10 @@ const logger = log => ({
 })
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
+
+const stylingPatterns =
+  // eslint-disable-next-line no-control-regex
+  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
 
 const bos = {
   peers,
