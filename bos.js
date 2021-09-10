@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   linked via `npm link balanceofsatoshis`
-  Used with bos v10.13.1
+  Used with bos v10.14.0
 */
 
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
@@ -19,6 +19,8 @@ import {
 // import { rebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
 import { manageRebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
 
+import { getDetailedBalance as bosGetDetailedBalance } from 'balanceofsatoshis/balances/index.js'
+
 import {
   pushPayment as bosPushPayment,
   reconnect as bosReconnect,
@@ -28,6 +30,37 @@ import {
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
+
+// returns {closing_balance, offchain_balance, offchain_pending, onchain_balance, onchain_vbytes}
+const getDetailedBalance = async (choices = {}, log = false) => {
+  try {
+    console.boring(`${getDate()} bos.getDetailedBalance()`)
+    const res = await bosGetDetailedBalance({
+      lnd: await mylnd(), // required
+      ...choices
+    })
+    log && console.log(`${getDate()} bos.getDetailedBalance() complete`, res)
+
+    const stylingPatterns =
+      // eslint-disable-next-line no-control-regex
+      /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
+    return JSON.parse(
+      JSON.stringify(res, (k, v) =>
+        typeof v === 'string'
+          ? v.replace(stylingPatterns, '')
+          : v === undefined
+          ? 0
+          : v
+      )
+    )
+  } catch (e) {
+    console.error(
+      `\n${getDate()} bos.getDetailedBalance() aborted:`,
+      JSON.stringify(e)
+    )
+    return {}
+  }
+}
 
 // returns {description, title, data: []}
 const getFeesPaid = async (choices = {}, log = false) => {
@@ -397,6 +430,7 @@ const bos = {
   forwards,
   getFeesChart,
   getChainFeesChart,
-  getFeesPaid
+  getFeesPaid,
+  getDetailedBalance
 }
 export default bos
