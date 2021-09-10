@@ -323,10 +323,9 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 
 // bos call api commands to lnd
 // bos call getIdentity - get my pub key
-// bos call getForwards - forwarding events
 // bos call getChannels - on-chain channel info
 // bos call getFeeRates - has base fee info (via channel or tx ids, not pubkeys)
-// bos call getForwards - choices: either {limit: 5} or {token: '{"offset":10,"limit":5}'}
+// bos call getForwards - forwarding events, choices: either {limit: 5} or {token: `{"offset":10,"limit":5}`}
 // names for methods and choices for arguments via `bos call` or here
 // https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
 const callAPI = async (method, choices = {}) => {
@@ -405,6 +404,82 @@ const getFees = async (log = false) => {
   }
 }
 
+// ---- I needed this
+
+// does calls bos call getChannels and bos call getForwards
+// and returns {byPeer: {[public_key]: [forwards]}, byTime: [forwards]}
+// forwards look like:
+/*
+{
+  created_at: '2021-09-10T14:31:44.000Z',
+  fee: 34,
+  fee_mtokens: 34253,
+  incoming_channel: '689868x588x1',
+  mtokens: 546018000,
+  outgoing_channel: '689686x689x1',
+  tokens: 546018,
+  created_at_ms: 1631284304000,
+  outgoing_peer: '03271338633d2d37b285dae4df40b413d8c6c791fbee7797bc5dc70812196d7d5c',
+  incoming_peer: '037cc5f9f1da20ac0d60e83989729a204a33cc2d8e80438969fadf35c1c5f1233b'
+}
+*/
+
+const customGetForwardingEvents = async ({
+  days = 1,
+  max_minutes = 1
+} = {}) => {
+  let started = Date.now()
+  const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
+
+  const byPeer = {}
+  const byTime = []
+
+  const pageSize = 1000
+  let page = 0
+
+  // need a table to convert short channel id's to public keys
+  const getChannels = await callAPI('getChannels')
+  const idToPublicKey = {}
+  getChannels.channels.forEach(channel => {
+    idToPublicKey[channel.id] = channel.partner_public_key
+  })
+
+  while (Date.now() - started < max_minutes * 60 * 1000) {
+    // get newer events
+    const res = await callAPI('getForwards', {
+      token: `{"offset":${pageSize * page++},"limit":${pageSize}}`
+    })
+
+    const forwards = res.forwards || [] // old to new
+
+    if (forwards.length === 0) break // done
+    if (!isRecent(forwards[0].created_at)) continue // page too old
+
+    forwards.reverse() // old to new
+
+    for (const routed of forwards) {
+      if (!isRecent(routed.created_at)) continue // next item
+
+      const outPeer = idToPublicKey[routed.outgoing_channel] || 'unknown'
+      const inPeer = idToPublicKey[routed.incoming_channel] || 'unknown'
+
+      // switch to timestamp and public key
+      routed.created_at_ms = Date.parse(routed.created_at)
+      routed.outgoing_peer = outPeer
+      routed.incoming_peer = inPeer
+      routed.fee_mtokens = +routed.fee_mtokens
+      routed.mtokens = +routed.mtokens
+
+      if (byPeer[outPeer]) byPeer[outPeer].push(routed)
+      else byPeer[outPeer] = [routed]
+
+      byTime.push(routed)
+    }
+  }
+
+  return { byPeer, byTime }
+}
+
 const getDate = timestamp =>
   (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
@@ -431,6 +506,7 @@ const bos = {
   getFeesChart,
   getChainFeesChart,
   getFeesPaid,
-  getDetailedBalance
+  getDetailedBalance,
+  customGetForwardingEvents
 }
 export default bos
