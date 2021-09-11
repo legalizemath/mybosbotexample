@@ -519,7 +519,7 @@ const request = fetchRequest({ fetch })
 
 const fixJSON = (k, v) => (v === undefined ? null : v)
 
-const removeSyling = v =>
+const removeStyling = v =>
   JSON.parse(
     JSON.stringify(v, (k, v) =>
       // removing styling so can get numbers directly & replacing unknown with 0
@@ -533,7 +533,7 @@ const removeSyling = v =>
 
 const logger = log => ({
   info: v =>
-    log ? console.log(getDate(), removeSyling(v)) : process.stdout.write('.'),
+    log ? console.log(getDate(), removeStyling(v)) : process.stdout.write('.'),
   error: v => (log ? console.error(getDate(), v) : process.stdout.write('!'))
 })
 
