@@ -404,12 +404,29 @@ const getFees = async (log = false) => {
   }
 }
 
+// token looks like adsfasfdsf:adsfsadfasdfasfasdfasfd-asdfsf
+// chat_id looks like 1231231231
+const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
+  try {
+    log && console.boring(`${getDate()} bos.sayWithTelegramBot()`)
+    const res = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` +
+        `&text="${encodeURIComponent(message)}"`
+    )
+    log && console.boring(`${getDate()} bos.sayWithTelegramBot() result:`, res)
+    return res
+  } catch (e) {
+    console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
+    return null
+  }
+}
+
 // ---- I needed this
 
 // does calls bos call getChannels and bos call getForwards
 // and returns by peer: {[public_keys]: [forwards]}
 // or by time: [forwards]
-// forwards look like:
+// forwards look like this with my changes:
 /*
 {
   created_at: '2021-09-10T14:31:44.000Z',
@@ -514,17 +531,6 @@ const removeSyling = v =>
     )
   )
 
-// JSON.parse(
-//   JSON.stringify(res, (k, v) =>
-//     // removing styling so can get numbers directly & replacing unknown with 0
-//     typeof v === 'string'
-//       ? v.replace(stylingPatterns, '')
-//       : v === undefined
-//       ? 0
-//       : v
-//   )
-// )
-
 const logger = log => ({
   info: v =>
     log ? console.log(getDate(), removeSyling(v)) : process.stdout.write('.'),
@@ -550,6 +556,7 @@ const bos = {
   getChainFeesChart,
   getFeesPaid,
   getDetailedBalance,
-  customGetForwardingEvents
+  customGetForwardingEvents,
+  sayWithTelegramBot
 }
 export default bos
