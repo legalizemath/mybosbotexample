@@ -503,7 +503,8 @@ const request = fetchRequest({ fetch })
 const fixJSON = (k, v) => (v === undefined ? null : v)
 
 const logger = log => ({
-  info: v => (log ? console.log(getDate(), v) : process.stdout.write('.'))
+  info: v => (log ? console.log(getDate(), v) : process.stdout.write('.')),
+  error: v => (log ? console.error(getDate(), v) : process.stdout.write('!'))
 })
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
