@@ -125,7 +125,7 @@ const getChainFeesChart = async (choices = {}, log = false) => {
       `\n${getDate()} bos.getChainFeesChart() aborted:`,
       JSON.stringify(e)
     )
-    return {}
+    return { data: [] }
   }
 }
 
@@ -181,7 +181,7 @@ const rebalance = async (
       timeout_minutes: Math.trunc(maxMinutes),
       max_fee_rate: Math.trunc(maxFeeRate),
       max_fee: Math.trunc(maxSats * 0.01), // unused, 10k ppm
-      avoid: [], // necessary
+      avoid: [],
       // out_channels: [],
       // in_outound: undefined,
       // out_inbound: undefined,
@@ -502,8 +502,32 @@ const request = fetchRequest({ fetch })
 
 const fixJSON = (k, v) => (v === undefined ? null : v)
 
+const removeSyling = v =>
+  JSON.parse(
+    JSON.stringify(v, (k, v) =>
+      // removing styling so can get numbers directly & replacing unknown with 0
+      typeof v === 'string'
+        ? v.replace(stylingPatterns, '')
+        : v === undefined
+        ? null
+        : v
+    )
+  )
+
+// JSON.parse(
+//   JSON.stringify(res, (k, v) =>
+//     // removing styling so can get numbers directly & replacing unknown with 0
+//     typeof v === 'string'
+//       ? v.replace(stylingPatterns, '')
+//       : v === undefined
+//       ? 0
+//       : v
+//   )
+// )
+
 const logger = log => ({
-  info: v => (log ? console.log(getDate(), v) : process.stdout.write('.')),
+  info: v =>
+    log ? console.log(getDate(), removeSyling(v)) : process.stdout.write('.'),
   error: v => (log ? console.error(getDate(), v) : process.stdout.write('!'))
 })
 
