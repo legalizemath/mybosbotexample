@@ -41,16 +41,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
     })
     log && console.log(`${getDate()} bos.getDetailedBalance() complete`, res)
 
-    return JSON.parse(
-      JSON.stringify(res, (k, v) =>
-        // removing styling so can get numbers directly & replacing unknown with 0
-        typeof v === 'string'
-          ? v.replace(stylingPatterns, '')
-          : v === undefined
-          ? 0
-          : v
-      )
-    )
+    return removeStyling(res)
   } catch (e) {
     console.error(
       `\n${getDate()} bos.getDetailedBalance() aborted:`,
@@ -411,10 +402,16 @@ const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
     log && console.boring(`${getDate()} bos.sayWithTelegramBot()`)
     const res = await fetch(
       `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` +
-        `&text="${encodeURIComponent(message)}"`
+        `&text=${encodeURIComponent(message)}`
     )
-    log && console.boring(`${getDate()} bos.sayWithTelegramBot() result:`, res)
-    return res
+    const fullResponse = await res.json()
+    log &&
+      console.boring(
+        `${getDate()} bos.sayWithTelegramBot() result:`,
+        res,
+        fullResponse
+      )
+    return fullResponse
   } catch (e) {
     console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
     return null
@@ -511,6 +508,203 @@ const customGetForwardingEvents = async ({
   return byTime
 }
 
+/*
+  returns payment events, new to old [] of
+  {
+    destination: <public key string>
+    created_at: <iso timestamp string>
+    created_at_ms: <ms time stamp> // converted to int
+    fee: <sats integer>
+    fee_mtokens: <msats integer> // converted to int
+    hops: [<public key strings>]
+    id: <payment id hex>
+    index: <number in database>
+    is_confirmed: true (?)
+    is_outgoing: true (?)
+    mtokens: <msats integer paid> // converted to int
+    request: (?)
+    secret: <secret string hex>
+    safe_fee: <int>
+    safe_tokens: <int>
+    tokens: <int>
+    hops_details: [ // just for simplify: true
+      {channel, channel_capacity, fee, fee_mtokens, forward, forward_mtokens, public_key, timeout}
+      // mtokens converted to integer too
+    ]
+    attempts: // removed for simplify: true
+  }
+*/
+const customGetPaymentEvents = async (
+  {
+    days = 1, // how many days ago to look back
+    max_minutes_search = 1, // safety if takes too long
+    simplify = true, // remove failed attempts to save space
+    destination = undefined, // filter out by public key destination,
+    notDestination = undefined // filter out all payments to this destination
+  } = {},
+  log = false
+) => {
+  log && console.boring(`${getDate()} bos.customGetPaymentEvents()`)
+
+  let started = Date.now()
+
+  const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
+
+  const byTime = []
+
+  const pageSize = 1000
+  let nextOffset
+
+  const isTimedOut = () => {
+    const inTime = Date.now() - started < max_minutes_search * 60 * 1000
+    if (!inTime)
+      console.error(`${getDate()} bos.customGetPaymentEvents() timed out`)
+    return inTime
+  }
+
+  while (isTimedOut()) {
+    // get newer events
+    const res = await callAPI(
+      'getPayments',
+      !nextOffset
+        ? { limit: pageSize }
+        : {
+            token: nextOffset
+          }
+    )
+
+    nextOffset = res.next
+    const payments = res.payments || [] // new to old
+
+    if (payments.length === 0) break // done
+    if (!isRecent(payments[0].created_at)) break // pages now too old
+
+    for (const paid of payments) {
+      // beyond days back
+      if (!isRecent(paid.created_at)) break
+
+      // skip unwanted destinations
+      if (destination && paid.destination !== destination) continue
+      if (notDestination && paid.destination === notDestination) continue
+
+      // unexpected messages
+      if (paid.request) {
+        log &&
+          console.log(
+            `${getDate()} bos.customGetPaymentEvents() ??? request found`,
+            paid
+          )
+      }
+      if (paid.is_confirmed === false) {
+        log &&
+          console.log(
+            `${getDate()} bos.customGetPaymentEvents() ??? unconfirmed found`,
+            paid
+          )
+        continue
+      }
+
+      // switch to timestamp and public key
+      paid.created_at_ms = Date.parse(paid.created_at)
+      paid.fee_mtokens = +paid.fee_mtokens || 0
+      paid.mtokens = +paid.mtokens
+
+      if (simplify) {
+        // just relevant successful attempt kept
+        paid.hops_details = paid.attempts
+          .filter(a => a.is_confirmed)[0]
+          .route.hops.map(h => ({
+            ...h,
+            fee_mtokens: +h.fee_mtokens,
+            forward_mtokens: +h.forward_mtokens
+          }))
+        // get rid of giant fail-inclusive attempts list
+        delete paid.attempts
+      }
+
+      byTime.push(paid)
+    }
+  }
+
+  return byTime
+}
+
+/*
+[{chain_address, cltv_delta, confirmed_at,
+confirmed_index, created_at, description,
+description_hash, expires_at, features,
+id, index, is_canceled, is_confirmed,
+is_held, is_private, is_push, mtokens,
+payment, payments, received,
+received_mtokens, request, secret,
+tokens, created_at_ms, confirmed_at_ms}]
+*/
+const customGetReceivedEvents = async (
+  {
+    days = 1, // how many days ago to look back
+    max_minutes_search = 1, // safety if takes too long
+    idKeys = false // return object instead with ids as keys
+  } = {},
+  log = false
+) => {
+  log && console.boring(`${getDate()} bos.customGetReceivedEvents()`)
+
+  let started = Date.now()
+
+  const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
+
+  const byTime = []
+  const byId = {}
+
+  const pageSize = 1000
+  let nextOffset
+
+  const isTimedOut = () => {
+    const inTime = Date.now() - started < max_minutes_search * 60 * 1000
+    if (!inTime)
+      console.error(`${getDate()} bos.customGetReceivedEvents() timed out`)
+    return inTime
+  }
+
+  while (isTimedOut()) {
+    // get newer events
+    const res = await callAPI(
+      'getInvoices',
+      !nextOffset
+        ? { limit: pageSize }
+        : {
+            token: nextOffset
+          }
+    )
+
+    nextOffset = res.next
+
+    const payments = (res.invoices || []) // new to old
+      .filter(p => p.is_confirmed) // just care about completed
+
+    if (payments.length === 0) break // done
+
+    // if entire page now too old
+    if (!isRecent(payments[0].confirmed_at)) break
+
+    for (const paid of payments) {
+      // end if created before cut-off AND confirmed before cut-off
+      if (!isRecent(paid.confirmed_at)) break
+
+      // switch to timestamp and public key
+      paid.created_at_ms = Date.parse(paid.created_at)
+      paid.confirmed_at_ms = Date.parse(paid.confirmed_at)
+      paid.received_mtokens = +paid.received_mtokens || 0
+      paid.mtokens = +paid.mtokens || 0
+
+      if (idKeys) byId[paid.id] = paid
+      else byTime.push(paid)
+    }
+  }
+
+  return idKeys ? byId : byTime
+}
+
 const getDate = timestamp =>
   (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
@@ -519,9 +713,9 @@ const request = fetchRequest({ fetch })
 
 const fixJSON = (k, v) => (v === undefined ? null : v)
 
-const removeStyling = v =>
+const removeStyling = o =>
   JSON.parse(
-    JSON.stringify(v, (k, v) =>
+    JSON.stringify(o, (k, v) =>
       // removing styling so can get numbers directly & replacing unknown with 0
       typeof v === 'string'
         ? v.replace(stylingPatterns, '')
@@ -557,6 +751,8 @@ const bos = {
   getFeesPaid,
   getDetailedBalance,
   customGetForwardingEvents,
-  sayWithTelegramBot
+  sayWithTelegramBot,
+  customGetPaymentEvents,
+  customGetReceivedEvents
 }
 export default bos
