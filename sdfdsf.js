@@ -30,7 +30,11 @@ const MIN_CHAN_SIZE = 5 * (MIN_REBALANCE_SATS + MIN_SATS_OFF_BALANCE)
 // multiplier for proportional safety ppm margin
 const SAFETY_MARGIN = 1.1
 // minimum flat safety ppm margin & min for remote heavy channels
-const MIN_PPM_FOR_SAFETY = 222
+const SAFETY_MARGIN_FLAT = 222
+// as 0-profit fee rate increases, fee rate where where proportional
+// fee takes over flat one is
+// (break even fee rate) * SAFETY_MARGIN = SAFETY_MARGIN_FLAT
+
 // minimum ppm ever possible
 const MIN_PPM_ABSOLUTE = 0
 
@@ -645,7 +649,7 @@ const updateFees = async () => {
     // inbound fee rate should be lowest point for our fee rate unless local heavy
     let ppmSafe = max(ppmFair, peer.inbound_fee_rate)
 
-    // this also ensures at least MIN_PPM_FOR_SAFETY is used for balanced or remote heavy channels
+    // this also ensures at least SAFETY_MARGIN_FLAT is used for balanced or remote heavy channels
     // safe ppm is also larger than incoming fee rate for rebalancing
     // increase ppm by safety multiplier or by min ppm increase, whichever is greater
     // (removed peer.my_fee_rate)
@@ -1101,6 +1105,39 @@ const generateSnapshots = async () => {
 
   const balances = await bos.getDetailedBalance()
 
+  // get all payments
+  const getPaymentEvents = await bos.customGetPaymentEvents({
+    days: DAYS_FOR_STATS
+  })
+  // get all received funds
+  const getReceivedEvents = await bos.customGetReceivedEvents({
+    days: DAYS_FOR_STATS,
+    idKeys: true
+  })
+  const rebalances = getPaymentEvents.filter(
+    p => p.destination === mynode.my_public_key
+  )
+  const paidToOthersLN = getPaymentEvents.filter(
+    p => p.destination !== mynode.my_public_key
+  )
+  const receivedFromOthersLN = Object.assign({}, getReceivedEvents) // shallow clone
+  rebalances.forEach(r => {
+    delete receivedFromOthersLN[r.id]
+  })
+  const totalReceivedFromOthersLN =
+    Object.values(receivedFromOthersLN).reduce(
+      (t, r) => t + r.received_mtokens,
+      0
+    ) / 1000
+  const totalSentToOthersLN =
+    paidToOthersLN.reduce((t, p) => t + p.mtokens, 0) / 1000
+  const totalRebalances = rebalances.reduce((t, p) => t + p.mtokens, 0) / 1000
+
+  const totalRebalancedFees =
+    rebalances.reduce((t, p) => t + p.fee_mtokens, 0) / 1000
+  const totalSentToOthersFees =
+    paidToOthersLN.reduce((t, p) => t + p.fee_mtokens, 0) / 1000
+
   // prettier-ignore
   const summary = `${getDate()}
 
@@ -1135,6 +1172,10 @@ const generateSnapshots = async () => {
     peers used for routing-out:       ${totalPeersRoutingOut}
     peers used for routing-in:        ${totalPeersRoutingIn}
     earned per peer stats:            ${statsEarnedPerPeer} sats
+
+    LN received from others:          ${pretty(totalReceivedFromOthersLN)} sats (n: ${Object.keys(receivedFromOthersLN).length})
+    LN payments to others:            ${pretty(totalSentToOthersLN)} sats, fees: ${pretty(totalSentToOthersFees)} sats (n: ${paidToOthersLN.length})
+    LN total rebalanced:              ${pretty(totalRebalances)} sats, fees: ${pretty(totalRebalancedFees)} (n: ${rebalances.length})
 
     % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}
     avg forwarded ppm:                ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
@@ -1185,9 +1226,18 @@ const generateSnapshots = async () => {
   )
   fs.writeFileSync(`${SNAPSHOTS_PATH}/summary.txt`, summary)
 
+  // event lists
   fs.writeFileSync(
-    `${SNAPSHOTS_PATH}/forwards_${DAYS_FOR_STATS}days.json`,
+    `${SNAPSHOTS_PATH}/forwards.json`,
     JSON.stringify(forwards, fixJSON, 2)
+  )
+  fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/payments.json`,
+    JSON.stringify(getPaymentEvents, fixJSON, 2)
+  )
+  fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/received.json`,
+    JSON.stringify(getReceivedEvents, fixJSON, 2)
   )
 }
 
@@ -1266,10 +1316,10 @@ const initialize = async () => {
 }
 
 const subtractSafety = ppm =>
-  trunc(min(ppm - MIN_PPM_FOR_SAFETY, ppm / SAFETY_MARGIN))
+  trunc(min(ppm - SAFETY_MARGIN_FLAT, ppm / SAFETY_MARGIN))
 
 const addSafety = ppm =>
-  trunc(max(ppm + MIN_PPM_FOR_SAFETY, ppm * SAFETY_MARGIN)) + 1
+  trunc(max(ppm + SAFETY_MARGIN_FLAT, ppm * SAFETY_MARGIN)) + 1
 
 const isRemoteHeavy = p => p.unbalancedSatsSigned < -MIN_SATS_OFF_BALANCE
 
