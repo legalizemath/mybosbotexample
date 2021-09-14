@@ -439,13 +439,16 @@ const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
 }
 */
 
-const customGetForwardingEvents = async ({
-  days = 1, // how many days ago to look back
-  byInPeer = false, // use in-peers as keys instead of out-peers
-  timeArray = false, // return as array of time points instead of object
-  max_minutes_search = 1 // safety if takes too long
-} = {}) => {
-  console.boring(`${getDate()} bos.customGetForwardingEvents()`)
+const customGetForwardingEvents = async (
+  {
+    days = 1, // how many days ago to look back
+    byInPeer = false, // use in-peers as keys instead of out-peers
+    timeArray = false, // return as array of time points instead of object
+    max_minutes_search = 1 // safety if takes too long
+  } = {},
+  log = false
+) => {
+  log && console.boring(`${getDate()} bos.customGetForwardingEvents()`)
 
   let started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
@@ -559,10 +562,10 @@ const customGetPaymentEvents = async (
     const inTime = Date.now() - started < max_minutes_search * 60 * 1000
     if (!inTime)
       console.error(`${getDate()} bos.customGetPaymentEvents() timed out`)
-    return inTime
+    return !inTime
   }
 
-  while (isTimedOut()) {
+  while (!isTimedOut()) {
     // get newer events
     const res = await callAPI(
       'getPayments',
