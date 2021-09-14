@@ -24,7 +24,7 @@ const USE_KEYSENDS_AFTER_BALANCE = true
 // channels smaller than this not necessary to balance or adjust fees for
 // usually special cases anyway
 // (maybe use proportional fee policy for them instead)
-// ~2.04m now
+// >2m for now
 const MIN_CHAN_SIZE = 5 * (MIN_REBALANCE_SATS + MIN_SATS_OFF_BALANCE)
 
 // multiplier for proportional safety ppm margin
@@ -45,9 +45,9 @@ const BALANCE_DEV = 0.1
 const MAX_PPM_ABSOLUTE = 2992
 
 // max size of fee adjustment to target ppm (upward)
-const NUDGE_UP = 0.02
+const NUDGE_UP = 0.042
 // max size of fee adjustment to target ppm (downward)
-const NUDGE_DOWN = 0.02
+const NUDGE_DOWN = 0.1337
 // max minutes to spend per rebalance try
 const MINUTES_FOR_REBALANCE = 3
 // max minutes to spend per keysend try
@@ -64,7 +64,7 @@ const MINUTES_BETWEEN_FEE_CHANGES = 111
 // allow adjusting fees
 const ADJUST_FEES = true
 // how many days of no routing activity before reduction in fees
-const DAYS_FOR_FEE_REDUCTION = 3
+const DAYS_FOR_FEE_REDUCTION = 2
 // how many days since last successful rebalance to allow moving fee up
 // const DAYS_FOR_FEE_INCREASE = 1
 // how far back to look for routing stats (> DAYS_FOR_FEE_REDUCTION)
@@ -97,7 +97,8 @@ const SETTINGS_PATH = 'settings.json'
 
 // global node info
 const mynode = {
-  scriptStarted: Date.now()
+  scriptStarted: Date.now(),
+  my_public_key: ''
 }
 
 const runBot = async () => {
@@ -167,7 +168,7 @@ const findGoodPeer = async ({ localChannel, remoteChannel }) => {
   const localCandidates = []
   const uniquePeers = {}
 
-  // ppm should be below this level
+  // historic rebalancing ppm should be below this level
   const ppmCheck = subtractSafety(remoteChannel.my_fee_rate)
 
   // get updated active peer info
@@ -184,7 +185,7 @@ const findGoodPeer = async ({ localChannel, remoteChannel }) => {
   const balancingData =
     logFileData.rebalance?.filter(b => b.ppm < ppmCheck) || []
 
-  // very recent rebalances list
+  // very recent rebalances list to rule out very recent peers
   const recentBalances = balancingData.filter(
     b => Date.now() - b.t < MIN_MINUTES_BETWEEN_SAME_PAIR * 1000 * 60
   )
@@ -202,13 +203,16 @@ const findGoodPeer = async ({ localChannel, remoteChannel }) => {
     const peer = peers.find(p => p.public_key === candidate_public_key)
     // no current peer found w/ this attemp's public key
     if (!peer) continue
+    // determine is this is a good local-heavy match
     const goodMatch =
       // has to be different peer from localChannel before
       candidate_public_key !== localChannel.public_key &&
       // and unbalanced enough in remote direction to rebalance
       peer.unbalancedSatsSigned > MAX_REBALANCE_SATS &&
       // and this candidate can't be too recently used for this
-      !recentBalances.find(b => b.public_key === candidate_public_key)
+      !recentBalances.find(b => b.public_key === candidate_public_key) &&
+      // and there can be no manual rules to block this as local-heavy peer
+      !getRuleFromSettings({ alias: peer.alias })?.no_local_rebalance
 
     if (goodMatch) {
       localCandidates.push(peer)
@@ -232,8 +236,8 @@ const runBotGetPeers = async ({ all = false } = {}) => {
   const getPeers = all
     ? await bos.peers({
         active: undefined,
-        public: undefined,
-        earnings_days: DAYS_FOR_STATS
+        public: undefined
+        // earnings_days: DAYS_FOR_STATS // too little info
       })
     : await bos.peers()
 
@@ -666,9 +670,12 @@ const updateFees = async () => {
     // new setpoint above current?
     const isHigher = trunc(ppmSane) > peer.my_fee_rate
     const isLower = trunc(ppmSane) < peer.my_fee_rate
-    const daysNoRouting = (now - peer.last_outbound_at) / (1000 * 60 * 60 * 24)
+    const daysNoRouting = +(
+      (now - peer.routed_out_last_at) /
+      (1000 * 60 * 60 * 24)
+    ).toFixed(2)
     const daysNoRoutingString =
-      peer.last_outbound_at === 0 ? 'not recently' : daysNoRouting.toFixed(2)
+      peer.routed_out_last_at === 0 ? 'not recently' : daysNoRouting.toFixed(2)
 
     // prettier-ignore
     if (isHigher || isLower) {
@@ -875,6 +882,17 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }) => {
   `)
 }
 
+const readRecord = public_key => {
+  const fullPath = BALANCING_LOG_PATH + '/' + public_key.slice(0, 10) + '.json'
+  let oldRecord = {}
+  try {
+    oldRecord = JSON.parse(fs.readFileSync(fullPath))
+  } catch (e) {
+    //
+  }
+  return oldRecord
+}
+
 // generate data to save to files for easier external browsing
 const generateSnapshots = async () => {
   console.boring(`${getDate()} generateSnapshots()`)
@@ -882,8 +900,8 @@ const generateSnapshots = async () => {
   // on-chain channel info switched to object with keys of channel "id" ("partner_public_key" inside)
   // bos treats peers like every channel is combined but can have multiple channels w/ diff id w/ same peer
   const getChannels = await bos.callAPI('getChannels')
-  const idToPublicKey = {}
-  const publicKeyToIds = {}
+  const idToPublicKey = {} // id -> public_key table
+  const publicKeyToIds = {} // public_key -> id table
   const channelOnChainInfo = getChannels.channels.reduce((final, channel) => {
     const id = channel.id
     final[id] = channel
@@ -904,61 +922,242 @@ const generateSnapshots = async () => {
     return final
   }, {})
 
-  // forwards lookback
-  const getForwards = await bos.forwards({ days: DAYS_FOR_STATS }, false)
-  const forwards = getForwards.reduce((final, peer) => {
-    // convert ISO string to timestamp
-    peer.last_inbound_at = Date.parse(peer.last_inbound_at) || 0
-    peer.last_outbound_at = Date.parse(peer.last_outbound_at) || 0
-    final[peer.public_key] = peer
+  // get all peers info
+  const peers = await runBotGetPeers({ all: true })
+  const publicKeyToAlias = {} // public_key -> alias table
+  peers.forEach(p => {
+    publicKeyToAlias[p.public_key] = p.alias
+  })
+
+  // forwards lookback (this function didn't return enough info)
+  // const getForwards = await bos.forwards({ days: DAYS_FOR_STATS })
+  // const forwards = getForwards.reduce((final, peer) => {
+  //   // convert ISO string to timestamp
+  //   peer.routed_in_last_at = Date.parse(peer.routed_in_last_at) || 0
+  //   peer.routed_out_last_at = Date.parse(peer.routed_out_last_at) || 0
+  //   final[peer.public_key] = peer
+  //   return final
+  // }, {})
+
+  // specific routing events
+
+  // gets every routing event indexed by out peer
+  const peerForwardsByOuts = await bos.customGetForwardingEvents({
+    days: DAYS_FOR_STATS
+  })
+  // make a by-inlets reference table copy with ins as keys
+  const peerForwardsByIns = {}
+  // duplicate but indexed by in peer for simplicity, replace w/ reference copy
+  // const peerForwardsByIns = await bos.customGetForwardingEvents({
+  //   days: DAYS_FOR_STATS,
+  //   byInPeer: true
+  // })
+
+  // create a reference array of forwards
+  const forwardsAll = []
+
+  // summarize results myself from individual forwading events
+  const forwardsSum = {}
+  for (const out_public_key in peerForwardsByOuts) {
+    if (!forwardsSum[out_public_key]) forwardsSum[out_public_key] = {}
+    const peerEvents = peerForwardsByOuts[out_public_key] // take this
+    const peerSummary = forwardsSum[out_public_key] // and summarize here
+    peerSummary.public_key = out_public_key
+    peerSummary.alias = publicKeyToAlias[out_public_key]
+    const summary = peerEvents.reduce(
+      (final, forward) => {
+        if (forward.created_at_ms > final.routed_out_last_at)
+          final.routed_out_last_at = forward.created_at_ms
+        final.routed_out_msats += forward.mtokens
+        final.routed_out_fees_msats += forward.fee_mtokens
+        final.routed_out_count += 1
+
+        // bonus add this forward to complete array
+        forwardsAll.push(forward)
+        // add this forward reference to -ByIns version
+        if (!peerForwardsByIns[forward.incoming_peer])
+          peerForwardsByIns[forward.incoming_peer] = []
+        peerForwardsByIns[forward.incoming_peer].push(forward)
+
+        return final
+      },
+      {
+        routed_out_last_at: 0,
+        routed_out_msats: 0,
+        routed_out_fees_msats: 0,
+        routed_out_count: 0
+      }
+    )
+    peerSummary.routed_out_last_at = summary.routed_out_last_at
+    peerSummary.routed_out_msats = summary.routed_out_msats
+    peerSummary.routed_out_fees_msats = summary.routed_out_fees_msats
+    peerSummary.routed_out_count = summary.routed_out_count
+  }
+  // same thing for inlets
+  for (const in_public_key in peerForwardsByIns) {
+    if (!forwardsSum[in_public_key]) forwardsSum[in_public_key] = {}
+    const peerEvents = peerForwardsByIns[in_public_key] // take this
+    const peerSummary = forwardsSum[in_public_key] // and summarize here
+    peerSummary.public_key = in_public_key
+    peerSummary.alias = publicKeyToAlias[in_public_key]
+    const summary = peerEvents.reduce(
+      (final, forward) => {
+        if (forward.created_at_ms > final.routed_in_last_at)
+          final.routed_in_last_at = forward.created_at_ms
+        final.routed_in_msats += forward.mtokens
+        final.routed_in_fees_msats += forward.fee_mtokens
+        final.routed_in_count += 1
+        return final
+      },
+      {
+        routed_in_last_at: 0,
+        routed_in_msats: 0,
+        routed_in_fees_msats: 0,
+        routed_in_count: 0
+      }
+    )
+    peerSummary.routed_in_last_at = summary.routed_in_last_at
+    peerSummary.routed_in_msats = summary.routed_in_msats
+    peerSummary.routed_in_fees_msats = summary.routed_in_fees_msats
+    peerSummary.routed_in_count = summary.routed_in_count
+  }
+  // now forwardsSum has rebalance inflow and outflow info by each channel as key
+
+  // payments and received payments
+  // get all payments
+  const getPaymentEvents = await bos.customGetPaymentEvents({
+    days: DAYS_FOR_STATS
+  })
+  // get all received funds
+  const getReceivedEvents = await bos.customGetReceivedEvents({
+    days: DAYS_FOR_STATS,
+    idKeys: true
+  })
+  // get just payments to myself
+  const rebalances = getPaymentEvents.filter(
+    p => p.destination === mynode.my_public_key
+  )
+  // get payments to others
+  const paidToOthersLN = getPaymentEvents.filter(
+    p => p.destination !== mynode.my_public_key
+  )
+  // get list of received payments and remove those from payments to self
+  const receivedFromOthersLN = Object.assign({}, getReceivedEvents) // shallow clone
+  rebalances.forEach(r => {
+    delete receivedFromOthersLN[r.id]
+  })
+
+  // summarize rebalances for each peer
+  const rebalancesByPeer = rebalances.reduce((final, r) => {
+    const out_peer_public_key = r.hops[0]
+    const in_peer_public_key = r.hops[r.hops.length - 1]
+    const makeNewRebalanceSummary = pk => ({
+      alias: publicKeyToAlias[pk],
+      public_key: pk,
+      rebalanced_out_last_at: 0,
+      rebalanced_out_msats: 0,
+      rebalanced_out_fees_msats: 0,
+      rebalanced_out_count: 0,
+      rebalanced_in_last_at: 0,
+      rebalanced_in_msats: 0,
+      rebalanced_in_fees_msats: 0,
+      rebalanced_in_count: 0
+    })
+
+    if (!final[out_peer_public_key])
+      final[out_peer_public_key] = makeNewRebalanceSummary(out_peer_public_key)
+
+    if (!final[in_peer_public_key])
+      final[in_peer_public_key] = makeNewRebalanceSummary(in_peer_public_key)
+
+    // out
+    final[out_peer_public_key].rebalanced_out_last_at = max(
+      final[out_peer_public_key].rebalanced_out_last_at,
+      r.created_at_ms
+    )
+    final[out_peer_public_key].rebalanced_out_msats += r.mtokens
+    final[out_peer_public_key].rebalanced_out_fees_msats += r.fee_mtokens
+    final[out_peer_public_key].rebalanced_out_count += 1
+    // in
+    final[in_peer_public_key].rebalanced_in_last_at = max(
+      final[in_peer_public_key].rebalanced_in_last_at,
+      r.created_at_ms
+    )
+    final[in_peer_public_key].rebalanced_in_msats += r.mtokens
+    final[in_peer_public_key].rebalanced_in_fees_msats += r.fee_mtokens
+    final[in_peer_public_key].rebalanced_in_count += 1
+
+    // peer.rebalanced_out_last_at = 0
+    // peer.rebalanced_out_msats = 0
+    // peer.rebalanced_out_fees_msats = 0
+
+    // peer.rebalanced_in_last_at = 0
+    // peer.rebalanced_in_msats = 0
+    // peer.rebalanced_in_fees_msats = 0
+
     return final
   }, {})
 
-  // specific routing events
-  // const getForwardingEvents = await bos.callAPI('getForwards', {token: `{"offset":0,"limit":5}`})
-  // console.log(getForwardingEvents)
-
-  // gets every routing event
-  const peerForwards = await bos.customGetForwardingEvents({
-    days: DAYS_FOR_STATS
-  })
-  // again by ins for simplicity
-  const peerForwardsByIns = await bos.customGetForwardingEvents({
-    days: DAYS_FOR_STATS,
-    byInPeer: true
-  })
-
-  // get all peers info
-  const peers = await runBotGetPeers({ all: true })
-
-  // add in channel id's for each peer
+  // add in all extra new data for each peer
   peers.forEach(peer => {
+    // fee_earnings is from bos peer call with days specified, not necessary hmm
+
+    // place holders for rebelancing data
+    peer.rebalanced_out_last_at =
+      rebalancesByPeer[peer.public_key]?.rebalanced_out_last_at || 0
+    peer.rebalanced_out_msats =
+      rebalancesByPeer[peer.public_key]?.rebalanced_out_msats || 0
+    peer.rebalanced_out_fees_msats =
+      rebalancesByPeer[peer.public_key]?.rebalanced_out_fees_msats || 0
+    peer.rebalanced_out_count =
+      rebalancesByPeer[peer.public_key]?.rebalanced_out_count || 0
+
+    peer.rebalanced_in_last_at =
+      rebalancesByPeer[peer.public_key]?.rebalanced_in_last_at || 0
+    peer.rebalanced_in_msats =
+      rebalancesByPeer[peer.public_key]?.rebalanced_in_msats || 0
+    peer.rebalanced_in_fees_msats =
+      rebalancesByPeer[peer.public_key]?.rebalanced_in_fees_msats || 0
+    peer.rebalanced_in_count =
+      rebalancesByPeer[peer.public_key]?.rebalanced_in_count || 0
+
     // add fee data
-    peer.last_inbound_at = forwards[peer.public_key]?.last_inbound_at || 0
-    peer.last_outbound_at = forwards[peer.public_key]?.last_outbound_at || 0
-    peer.earned_inbound_fees =
-      forwards[peer.public_key]?.earned_inbound_fees || 0
-    peer.earned_outbound_fees =
-      forwards[peer.public_key]?.earned_outbound_fees || 0
+    peer.routed_out_last_at =
+      forwardsSum[peer.public_key]?.routed_out_last_at || 0
+    peer.routed_out_msats = forwardsSum[peer.public_key]?.routed_out_msats || 0
+    peer.routed_out_fees_msats =
+      forwardsSum[peer.public_key]?.routed_out_fees_msats || 0
+    peer.routed_out_count = forwardsSum[peer.public_key]?.routed_out_count || 0
 
-    peer.routed_out_msats = (peerForwards[peer.public_key] || []).reduce(
-      (total, v) => total + v.mtokens,
-      0
-    )
+    peer.routed_in_last_at =
+      forwardsSum[peer.public_key]?.routed_in_last_at || 0
+    peer.routed_in_msats = forwardsSum[peer.public_key]?.routed_in_msats || 0
+    peer.routed_in_fees_msats =
+      forwardsSum[peer.public_key]?.routed_in_fees_msats || 0
+    peer.routed_in_count = forwardsSum[peer.public_key]?.routed_in_count || 0
 
-    peer.routed_out_fees_msats = (peerForwards[peer.public_key] || []).reduce(
-      (total, v) => total + v.fee_mtokens,
-      0
-    )
+    // peer.earned_inbound_fees =
+    //   forwards[peer.public_key]?.earned_inbound_fees || 0
+    // peer.earned_outbound_fees =
+    //   forwards[peer.public_key]?.earned_outbound_fees || 0
 
-    peer.routed_in_msats = (peerForwardsByIns[peer.public_key] || []).reduce(
-      (total, v) => total + v.mtokens,
-      0
-    )
+    // peer.routed_out_msats = (peerForwardsByOuts[peer.public_key] || []).reduce(
+    //   (total, v) => total + v.mtokens,
+    //   0
+    // )
 
-    peer.routed_in_fees_msats = (
-      peerForwardsByIns[peer.public_key] || []
-    ).reduce((total, v) => total + v.fee_mtokens, 0)
+    // peer.routed_out_fees_msats = (
+    //   peerForwardsByOuts[peer.public_key] || []
+    // ).reduce((total, v) => total + v.fee_mtokens, 0)
+
+    // peer.routed_in_msats = (peerForwardsByIns[peer.public_key] || []).reduce(
+    //   (total, v) => total + v.mtokens,
+    //   0
+    // )
+
+    // peer.routed_in_fees_msats = (
+    //   peerForwardsByIns[peer.public_key] || []
+    // ).reduce((total, v) => total + v.fee_mtokens, 0)
 
     // grab array of separate short channel id's for this peer
     const ids = publicKeyToIds[peer.public_key]
@@ -1065,24 +1264,36 @@ const generateSnapshots = async () => {
     { f: pretty }
   )
 
-  const totalEarnedFromForwards = getForwards.reduce(
-    (sum, peer) => sum + (peer.earned_outbound_fees || 0),
-    0
-  )
+  const totalEarnedFromForwards =
+    peers.reduce((t, p) => t + p.routed_out_fees_msats, 0) / 1000
+
   const statsEarnedPerPeer = median(
-    getForwards
-      .filter(peer => peer.last_outbound_at)
-      .map(peer => peer.earned_outbound_fees || 0),
+    peers
+      .filter(p => p.routed_out_last_at)
+      .map(p => p.routed_out_fees_msats / 1000),
     { f: pretty }
   )
+  // const totalEarnedFromForwards = getForwards.reduce(
+  //   (sum, peer) => sum + (peer.earned_outbound_fees || 0),
+  //   0
+  // )
+  // const statsEarnedPerPeer = median(
+  //   getForwards
+  //     .filter(peer => peer.routed_out_last_at)
+  //     .map(peer => peer.earned_outbound_fees || 0),
+  //   { f: pretty }
+  // )
 
-  const totalPeersRoutingIn = getForwards.filter(
-    peer => peer.last_inbound_at
-  ).length
+  const totalPeersRoutingIn = peers.filter(p => p.routed_in_last_at).length
+  const totalPeersRoutingOut = peers.filter(p => p.routed_out_last_at).length
 
-  const totalPeersRoutingOut = getForwards.filter(
-    peer => peer.last_outbound_at
-  ).length
+  // const totalPeersRoutingIn = getForwards.filter(
+  //   peer => peer.routed_in_last_at
+  // ).length
+
+  // const totalPeersRoutingOut = getForwards.filter(
+  //   peer => peer.routed_out_last_at
+  // ).length
 
   // const earnedSummary = await bos.getFeesChart({ days: DAYS_FOR_STATS })
   const countsSummary = await bos.getFeesChart({
@@ -1105,25 +1316,7 @@ const generateSnapshots = async () => {
 
   const balances = await bos.getDetailedBalance()
 
-  // get all payments
-  const getPaymentEvents = await bos.customGetPaymentEvents({
-    days: DAYS_FOR_STATS
-  })
-  // get all received funds
-  const getReceivedEvents = await bos.customGetReceivedEvents({
-    days: DAYS_FOR_STATS,
-    idKeys: true
-  })
-  const rebalances = getPaymentEvents.filter(
-    p => p.destination === mynode.my_public_key
-  )
-  const paidToOthersLN = getPaymentEvents.filter(
-    p => p.destination !== mynode.my_public_key
-  )
-  const receivedFromOthersLN = Object.assign({}, getReceivedEvents) // shallow clone
-  rebalances.forEach(r => {
-    delete receivedFromOthersLN[r.id]
-  })
+  // get totals from payments and received
   const totalReceivedFromOthersLN =
     Object.values(receivedFromOthersLN).reduce(
       (t, r) => t + r.received_mtokens,
@@ -1137,6 +1330,22 @@ const generateSnapshots = async () => {
     rebalances.reduce((t, p) => t + p.fee_mtokens, 0) / 1000
   const totalSentToOthersFees =
     paidToOthersLN.reduce((t, p) => t + p.fee_mtokens, 0) / 1000
+
+  // stats with individual forwards resolution by size in msats ranges
+  const forwardStats = forwardsAll.reduce((final, it) => {
+    for (const top of [1e5, 1e7, 1e9, 1e11]) {
+      if (!final[String(top)])
+        final[String(top)] = { mtokens: 0, count: 0, fee_mtokens: 0 }
+      if (it.mtokens < top) {
+        final[String(top)].count = final[String(top)].count + 1
+        final[String(top)].mtokens = final[String(top)].mtokens + it.mtokens
+        final[String(top)].fee_mtokens =
+          final[String(top)].fee_mtokens + it.fee_mtokens
+        break // done with this forward
+      }
+    }
+    return final
+  }, {})
 
   // prettier-ignore
   const summary = `${getDate()}
@@ -1166,9 +1375,26 @@ const generateSnapshots = async () => {
 
     NET PROFIT:                       ${pretty(totalProfit)} sats
 
-    total forwarded:                  ${pretty(totalRouted)} sats
-    number of tx forwarded:           ${totalForwardsCount}
-    avg forward size:                 ${pretty(totalRouted / totalForwardsCount)} sats
+    total forwarded:                  ${pretty(totalRouted)} sats (n: ${totalForwardsCount})
+
+    forwards stats by size:
+
+          0 - 100 sats                ${pretty(forwardStats[String(1e5)].mtokens / 1000)} sats routed
+                                      ${pretty(forwardStats[String(1e5)].fee_mtokens / 1000)} sats earned
+                                      ${pretty(forwardStats[String(1e5)].count)} count
+
+        100 - 10k sats                ${pretty(forwardStats[String(1e7)].mtokens / 1000)} sats routed
+                                      ${pretty(forwardStats[String(1e7)].fee_mtokens / 1000)} sats earned
+                                      ${pretty(forwardStats[String(1e7)].count)} count
+
+        10k - 1M sats                 ${pretty(forwardStats[String(1e9)].mtokens / 1000)} sats routed
+                                      ${pretty(forwardStats[String(1e9)].fee_mtokens / 1000)} sats earned
+                                      ${pretty(forwardStats[String(1e9)].count)} count
+
+         1M - 100M sats               ${pretty(forwardStats[String(1e11)].mtokens / 1000)} sats routed
+                                      ${pretty(forwardStats[String(1e11)].fee_mtokens / 1000)} sats earned
+                                      ${pretty(forwardStats[String(1e11)].count)} count
+
     peers used for routing-out:       ${totalPeersRoutingOut}
     peers used for routing-in:        ${totalPeersRoutingIn}
     earned per peer stats:            ${statsEarnedPerPeer} sats
@@ -1177,7 +1403,7 @@ const generateSnapshots = async () => {
     LN payments to others:            ${pretty(totalSentToOthersLN)} sats, fees: ${pretty(totalSentToOthersFees)} sats (n: ${paidToOthersLN.length})
     LN total rebalanced:              ${pretty(totalRebalances)} sats, fees: ${pretty(totalRebalancedFees)} (n: ${rebalances.length})
 
-    % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}
+    % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}%
     avg forwarded ppm:                ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
     avg profit ppm:                   ${(totalProfit / totalLocalSats * 1e6).toFixed(0)} ppm
     est. annual ROI:                  ${(totalProfit / DAYS_FOR_STATS * 365.25 / totalLocalSats * 100).toFixed(3)} %
@@ -1203,6 +1429,42 @@ const generateSnapshots = async () => {
   `
   console.log(summary)
 
+  // by channel summary
+  let flowRateSummary = `${getDate()} - over ${DAYS_FOR_STATS} days\n`
+  for (const p of peers) {
+    const local = ((p.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(
+      5,
+      '-'
+    )
+    const remote = ((p.inbound_liquidity / 1e6).toFixed(1) + 'M').padEnd(5, '-')
+    const rebIn = pretty(p.rebalanced_in_msats / DAYS_FOR_STATS) + ' msats/day'
+    const rebOut =
+      pretty(p.rebalanced_out_msats / DAYS_FOR_STATS) + ' msats/day'
+    const rebOutFees =
+      pretty(p.rebalanced_out_fees_msats / DAYS_FOR_STATS) + ' msats/day'
+    const rebOutPpm = (
+      (p.rebalanced_out_fees_msats / p.rebalanced_out_msats) * 1e6 || 0
+    ).toFixed(0)
+
+    const routeIn = pretty(p.routed_in_msats / DAYS_FOR_STATS) + ' msats/day'
+    const routeOut = pretty(p.routed_out_msats / DAYS_FOR_STATS) + ' msats/day'
+    const routeOutEarned =
+      pretty(p.routed_out_fees_msats / DAYS_FOR_STATS) + ' msats/day'
+    const routeOutPpm = (
+      (p.routed_out_fees_msats / p.routed_out_msats) * 1e6 || 0
+    ).toFixed(0)
+
+    // prettier-ignore
+    flowRateSummary += `
+      ${' '.repeat(19)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json)
+      \x1b[2m${routeIn.padStart(30)} <---- routing ----> ${routeOut.padEnd(26)} +${routeOutEarned.padEnd(20)} (${routeOutPpm})\x1b[0m
+      \x1b[2m${rebIn.padStart(30)} <-- rebalancing --> ${rebOut.padEnd(26)} -${rebOutFees.padEnd(20)} (${rebOutPpm})\x1b[0m
+      \x1b[2m${' '.repeat(19)}rebalaces/ppm: ${median((readRecord(p.public_key).rebalance || []).filter(r => !r.failed).map(r => r.ppm))}\x1b[0m
+      \x1b[2m${' '.repeat(19)}${Object.entries(readRecord(p.public_key).ppmTargets || {}).reduce((f, e) => `${f}  ${e[0]}: ${+e[1].toFixed(2)} /`, '').slice(0, -1)}\x1b[0m
+    `
+  }
+  console.log(flowRateSummary)
+
   // write LN state snapshot to files
   fs.writeFileSync(
     `${SNAPSHOTS_PATH}/channelOnChainInfo.json`,
@@ -1217,6 +1479,10 @@ const generateSnapshots = async () => {
     JSON.stringify(idToPublicKey, fixJSON, 2)
   )
   fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/publicKeyToAlias.json`,
+    JSON.stringify(publicKeyToAlias, fixJSON, 2)
+  )
+  fs.writeFileSync(
     `${SNAPSHOTS_PATH}/feeRates.json`,
     JSON.stringify(feeRates, fixJSON, 2)
   )
@@ -1226,18 +1492,32 @@ const generateSnapshots = async () => {
   )
   fs.writeFileSync(`${SNAPSHOTS_PATH}/summary.txt`, summary)
 
-  // event lists
   fs.writeFileSync(
-    `${SNAPSHOTS_PATH}/forwards.json`,
-    JSON.stringify(forwards, fixJSON, 2)
+    `${SNAPSHOTS_PATH}/forwardsSum.json`,
+    JSON.stringify(forwardsSum, fixJSON, 2)
   )
   fs.writeFileSync(
-    `${SNAPSHOTS_PATH}/payments.json`,
-    JSON.stringify(getPaymentEvents, fixJSON, 2)
+    `${SNAPSHOTS_PATH}/forwardsByIns.json`,
+    JSON.stringify(peerForwardsByIns, fixJSON, 2)
   )
   fs.writeFileSync(
-    `${SNAPSHOTS_PATH}/received.json`,
-    JSON.stringify(getReceivedEvents, fixJSON, 2)
+    `${SNAPSHOTS_PATH}/forwardsByOuts.json`,
+    JSON.stringify(peerForwardsByOuts, fixJSON, 2)
+  )
+  // rebalance list array
+  fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/rebalances.json`,
+    JSON.stringify(rebalances, fixJSON, 2)
+  )
+  // rebalances sums by peer
+  fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/rebalancesSum.json`,
+    JSON.stringify(rebalancesByPeer, fixJSON, 2)
+  )
+  // flow rates
+  fs.writeFileSync(
+    `${SNAPSHOTS_PATH}/flowRateSummary.txt`,
+    flowRateSummary.replace(stylingPatterns, '')
   )
 }
 
@@ -1247,7 +1527,7 @@ const initialize = async () => {
   // get your own public key
   const getIdentity = await bos.callAPI('getIdentity')
   if (!getIdentity.public_key || getIdentity.public_key.length < 10)
-    throw 'no pubkey'
+    throw 'unknown public key'
   mynode.my_public_key = getIdentity.public_key
 
   const feeUpdatesPerDay = floor((60 * 24) / MINUTES_BETWEEN_FEE_CHANGES)
@@ -1343,6 +1623,10 @@ const isNotEmpty = obj => !isEmpty(obj)
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
 
 const sleep = async ms => await new Promise(r => setTimeout(r, trunc(ms)))
+
+const stylingPatterns =
+  // eslint-disable-next-line no-control-regex
+  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
 
 // returns mean, truncated fractions
 const median = (numbers = [], { obj = false, f = v => v } = {}) => {
