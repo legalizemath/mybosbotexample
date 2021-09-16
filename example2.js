@@ -11,6 +11,7 @@ const MINUTES_BETWEEN_RUNS = 1
 const MIN_SATS_ON_SIDE = 2000000
 const MIN_OFF_BALANCE = 0.25
 const MIN_REBALANCE = 50000 // bos minimum
+const MAX_REBALANCE = 500000 // custom max amount to ever try in 1 attempt
 
 // this function will loop itself forever
 const bot = async () => {
@@ -60,7 +61,8 @@ const bot = async () => {
     // max amount to rebalance is the sats
     const maxSatsToRebalance = Math.min(
       Math.max(localHeavy.localSatsOffTarget, MIN_REBALANCE),
-      Math.max(remoteHeavy.remoteSatsOffTarget, MIN_REBALANCE)
+      Math.max(remoteHeavy.remoteSatsOffTarget, MIN_REBALANCE),
+      MAX_REBALANCE
     )
 
     // try to rebalance them
