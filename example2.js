@@ -65,20 +65,24 @@ const bot = async () => {
 
     // try to rebalance them
     console.log(
-      `Trying to rebalance sats from ${localHeavy.alias} to ${remoteHeavy.alias}`
+      `Trying to rebalance sats from ${localHeavy.alias} to ${remoteHeavy.alias} max amount of` +
+      `${maxSatsToRebalance} sats at max fee rate of ${MAX_REBALANCE_FEE_RATE}` +
+      `for max attempt length of ${MAX_REBALANCE_MINUTES} minutes`
     )
-    const result = await bos.rebalance(
-      {
-        fromChannel: localHeavy.public_key,
-        toChannel: remoteHeavy.public_key,
-        maxSats: maxSatsToRebalance,
-        maxMinutes: MAX_REBALANCE_MINUTES,
-        maxFeeRate: MAX_REBALANCE_FEE_RATE
-      },
-      {},
-      true
-    )
-    console.log(result)
+    
+    // remove // to turn stuff back on below this
+    // const result = await bos.rebalance(
+    //   {
+    //     fromChannel: localHeavy.public_key,
+    //     toChannel: remoteHeavy.public_key,
+    //     maxSats: maxSatsToRebalance,
+    //     maxMinutes: MAX_REBALANCE_MINUTES,
+    //     maxFeeRate: MAX_REBALANCE_FEE_RATE
+    //   },
+    //   {},
+    //   true
+    // )
+    // console.log(result)
   }
 
   // try reconnecting to disconnected peers
