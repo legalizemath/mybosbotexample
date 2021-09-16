@@ -27,8 +27,8 @@ const bot = async () => {
     peer.balance = peer.localSats / peer.totalSats
     peer.satsOffBalance = Math.abs(peer.localSats - peer.remoteSats) * 0.5
 
-    peer.localTargetSats = (0.5 + MIN_OFF_BALANCE) * peer.totalSats
-    peer.remoteTargetSats = (0.5 - MIN_OFF_BALANCE) * peer.totalSats
+    peer.localTargetSats = MIN_OFF_BALANCE * peer.totalSats
+    peer.remoteTargetSats = MIN_OFF_BALANCE * peer.totalSats
     peer.localSatsOffTarget = peer.localSats - peer.localTargetSats
     peer.remoteSatsOffTarget = peer.remoteSats - peer.remoteTargetSats
 
