@@ -42,3 +42,5 @@ there's 0 package dependencies except for this link
 
 I stop it with ctrl-c
 
+#Bitcoin, not 💩coin
+
