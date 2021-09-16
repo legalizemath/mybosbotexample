@@ -7,7 +7,7 @@ import bos from './bos.js' // my wrappers for bos in bos.js file
 const MAX_REBALANCE_FEE_RATE = 400
 const MAX_REBALANCE_MINUTES = 5
 // how often to repeat
-const MINUTES_BETWEEN_RUNS = 60
+const MINUTES_BETWEEN_RUNS = 1
 const MIN_SATS_ON_SIDE = 2000000
 const MIN_OFF_BALANCE = 0.25
 const MIN_REBALANCE = 50000 // bos minimum
@@ -86,9 +86,10 @@ const bot = async () => {
   }
 
   // try reconnecting to disconnected peers
-  await bos.reconnect(true)
+  console.log(`attempting reconnect`)
+  //   await bos.reconnect(true)
 
-  // wait 60 minutes
+  // wait MINUTES_BETWEEN_RUNS minutes
   console.log('sleep time (minutes):', MINUTES_BETWEEN_RUNS)
   await sleep(MINUTES_BETWEEN_RUNS)
 
