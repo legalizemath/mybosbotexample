@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   linked via `npm link balanceofsatoshis`
-  Used with bos v10.14.0
+  Used with npm i -g balanceofsatoshis@10.14.0
 */
 
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
@@ -43,10 +43,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 
     return removeStyling(res)
   } catch (e) {
-    console.error(
-      `\n${getDate()} bos.getDetailedBalance() aborted:`,
-      JSON.stringify(e)
-    )
+    console.error(`\n${getDate()} bos.getDetailedBalance() aborted:`, JSON.stringify(e))
     return {}
   }
 }
@@ -67,10 +64,7 @@ const getFeesPaid = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesPaid() complete`, res)
     return res
   } catch (e) {
-    console.error(
-      `\n${getDate()} bos.getFeesPaid() aborted:`,
-      JSON.stringify(e)
-    )
+    console.error(`\n${getDate()} bos.getFeesPaid() aborted:`, JSON.stringify(e))
     return {}
   }
 }
@@ -90,10 +84,7 @@ const getFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(
-      `\n${getDate()} bos.getFeesChart() aborted:`,
-      JSON.stringify(e)
-    )
+    console.error(`\n${getDate()} bos.getFeesChart() aborted:`, JSON.stringify(e))
     return {}
   }
 }
@@ -112,10 +103,7 @@ const getChainFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getChainFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(
-      `\n${getDate()} bos.getChainFeesChart() aborted:`,
-      JSON.stringify(e)
-    )
+    console.error(`\n${getDate()} bos.getChainFeesChart() aborted:`, JSON.stringify(e))
     return { data: [] }
   }
 }
@@ -153,13 +141,7 @@ const reconnect = async (log = false) => {
 }
 
 const rebalance = async (
-  {
-    fromChannel,
-    toChannel,
-    maxSats = 200000,
-    maxMinutes = 2,
-    maxFeeRate = 100
-  },
+  { fromChannel, toChannel, maxSats = 200000, maxMinutes = 2, maxFeeRate = 100 },
   choices = {},
   log = false
 ) => {
@@ -178,11 +160,7 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    log &&
-      console.boring(
-        `${getDate()} bos.rebalance()`,
-        log ? JSON.stringify(options) : ''
-      )
+    log && console.boring(`${getDate()} bos.rebalance()`, log ? JSON.stringify(options) : '')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(), // required
@@ -190,11 +168,7 @@ const rebalance = async (
       out_channels: [], // seems necessary
       ...options
     })
-    log &&
-      console.log(
-        `\n${getDate()} bos.rebalance() success:`,
-        JSON.stringify(res)
-      )
+    log && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
     console.log('')
     return {
       fee_rate: +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1],
@@ -205,8 +179,7 @@ const rebalance = async (
     // provide suggested ppm if possible
     return {
       failed: true,
-      ppmSuggested:
-        e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
+      ppmSuggested: e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
       msg: e
     }
   }
@@ -219,7 +192,8 @@ const send = async (
     toChannel = undefined, // public key
     sats = 1,
     maxMinutes = 1,
-    maxFeeRate = 100
+    maxFeeRate = 100,
+    message = undefined // string to send
   },
   log = false,
   retry = false
@@ -231,15 +205,11 @@ const send = async (
     amount: String(Math.trunc(sats)),
     timeout_minutes: Math.trunc(maxMinutes),
     // uses max fee (sats) only so calculated from max fee rate (ppm)
-    max_fee: Math.trunc(sats * maxFeeRate * 1e-6 + 1)
-    // message: '',
+    max_fee: Math.trunc(sats * maxFeeRate * 1e-6 + 1),
+    message
   }
   try {
-    log &&
-      console.boring(
-        `${getDate()} bos.send() to ${destination}`,
-        log ? JSON.stringify(options) : ''
-      )
+    log && console.boring(`${getDate()} bos.send() to ${destination}`, log ? JSON.stringify(options) : '')
     const res = await bosPushPayment({
       lnd: await mylnd(),
       logger: logger(log),
@@ -250,12 +220,12 @@ const send = async (
       request,
       ...options
     })
-    log &&
-      console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
+    log && console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
     console.log('')
     return {
       fee_rate: Math.trunc(((1.0 * +res.fee) / +res.paid) * 1e6),
-      rebalanced: Math.trunc(+res.paid - +res.fee)
+      sent: Math.trunc(+res.paid), // total sent including fee
+      rebalanced: Math.trunc(+res.paid - +res.fee) // to match bos.rebalance key
     }
   } catch (e) {
     console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
@@ -264,9 +234,7 @@ const send = async (
 
     // if higher fee was JUST found try just 1 more time
     if (!retry && e[1] === 'FeeInsufficient') {
-      console.error(
-        `\n${getDate()} retrying just once after FeeInsufficient error`
-      )
+      console.error(`\n${getDate()} retrying just once after FeeInsufficient error`)
       return await send(
         {
           destination,
@@ -282,10 +250,7 @@ const send = async (
     }
     return {
       failed: true,
-      ppmSuggested:
-        e[1] === 'MaxFeeLimitTooLow'
-          ? Math.trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0)
-          : null,
+      ppmSuggested: e[1] === 'MaxFeeLimitTooLow' ? Math.trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0) : null,
       msg: e
     }
   }
@@ -303,8 +268,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
       fee_rate: String(fee_rate) // pm rate to set
     })
     const newFee = res.rows[1][1]?.match(/\((.*)\)/)[1]
-    log &&
-      console.log(`${getDate()} bos.setFees()`, JSON.stringify(res), newFee)
+    log && console.log(`${getDate()} bos.setFees()`, JSON.stringify(res), newFee)
     return +newFee
   } catch (e) {
     console.error(`${getDate()} bos.setFees() aborted:`, e)
@@ -353,8 +317,7 @@ const peers = async (choices = {}, log = false) => {
         inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1] || 0
       }))
 
-    log &&
-      console.log(`${getDate()} bos.peers()`, JSON.stringify(peers, fixJSON, 2))
+    log && console.log(`${getDate()} bos.peers()`, JSON.stringify(peers, fixJSON, 2))
     return peers
   } catch (e) {
     console.error(`${getDate()} bos.peers() aborted:`, e)
@@ -372,11 +335,7 @@ const getFees = async (log = false) => {
       logger: {}, // logger not used
       to: [] // array of pubkeys to adjust fees towards
     })
-    log &&
-      console.log(
-        `${getDate()} bos.getFees() result:`,
-        JSON.stringify(res, fixJSON, 2)
-      )
+    log && console.log(`${getDate()} bos.getFees() result:`, JSON.stringify(res, fixJSON, 2))
 
     const myFees = res.rows
       .slice(1) // remove table headers row
@@ -401,16 +360,10 @@ const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
   try {
     log && console.boring(`${getDate()} bos.sayWithTelegramBot()`)
     const res = await fetch(
-      `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` +
-        `&text=${encodeURIComponent(message)}`
+      `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` + `&text=${encodeURIComponent(message)}`
     )
     const fullResponse = await res.json()
-    log &&
-      console.boring(
-        `${getDate()} bos.sayWithTelegramBot() result:`,
-        res,
-        fullResponse
-      )
+    log && console.boring(`${getDate()} bos.sayWithTelegramBot() result:`, res, fullResponse)
     return fullResponse
   } catch (e) {
     console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
@@ -450,7 +403,7 @@ const customGetForwardingEvents = async (
 ) => {
   log && console.boring(`${getDate()} bos.customGetForwardingEvents()`)
 
-  let started = Date.now()
+  const started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
 
   const byPeer = {}
@@ -549,19 +502,20 @@ const customGetPaymentEvents = async (
 ) => {
   log && console.boring(`${getDate()} bos.customGetPaymentEvents()`)
 
-  let started = Date.now()
+  const started = Date.now()
 
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
 
   const byTime = []
 
-  const pageSize = 1000
+  const pageSize = 2000
   let nextOffset
 
   const isTimedOut = () => {
     const inTime = Date.now() - started < max_minutes_search * 60 * 1000
-    if (!inTime)
+    if (!inTime) {
       console.error(`${getDate()} bos.customGetPaymentEvents() timed out`)
+    }
     return !inTime
   }
 
@@ -592,18 +546,10 @@ const customGetPaymentEvents = async (
 
       // unexpected messages
       if (paid.request) {
-        log &&
-          console.log(
-            `${getDate()} bos.customGetPaymentEvents() ??? request found`,
-            paid
-          )
+        log && console.log(`${getDate()} bos.customGetPaymentEvents() ??? request found`, paid)
       }
       if (paid.is_confirmed === false) {
-        log &&
-          console.log(
-            `${getDate()} bos.customGetPaymentEvents() ??? unconfirmed found`,
-            paid
-          )
+        log && console.log(`${getDate()} bos.customGetPaymentEvents() ??? unconfirmed found`, paid)
         continue
       }
 
@@ -652,20 +598,21 @@ const customGetReceivedEvents = async (
 ) => {
   log && console.boring(`${getDate()} bos.customGetReceivedEvents()`)
 
-  let started = Date.now()
+  const started = Date.now()
 
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
 
   const byTime = []
   const byId = {}
 
-  const pageSize = 1000
+  const pageSize = 2000
   let nextOffset
 
   const isTimedOut = () => {
     const inTime = Date.now() - started < max_minutes_search * 60 * 1000
-    if (!inTime)
+    if (!inTime) {
       console.error(`${getDate()} bos.customGetReceivedEvents() timed out`)
+    }
     return inTime
   }
 
@@ -708,8 +655,7 @@ const customGetReceivedEvents = async (
   return idKeys ? byId : byTime
 }
 
-const getDate = timestamp =>
-  (timestamp ? new Date(timestamp) : new Date()).toISOString()
+const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
 // const request = (o, cbk) => cbk(null, {}, {})
 const request = fetchRequest({ fetch })
@@ -720,17 +666,12 @@ const removeStyling = o =>
   JSON.parse(
     JSON.stringify(o, (k, v) =>
       // removing styling so can get numbers directly & replacing unknown with 0
-      typeof v === 'string'
-        ? v.replace(stylingPatterns, '')
-        : v === undefined
-        ? null
-        : v
+      typeof v === 'string' ? v.replace(stylingPatterns, '') : v === undefined ? null : v
     )
   )
 
 const logger = log => ({
-  info: v =>
-    log ? console.log(getDate(), removeStyling(v)) : process.stdout.write('.'),
+  info: v => (log ? console.log(getDate(), removeStyling(v)) : process.stdout.write('.')),
   error: v => (log ? console.error(getDate(), v) : process.stdout.write('!'))
 })
 
