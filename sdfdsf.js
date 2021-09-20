@@ -425,7 +425,7 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
 
     Attempt to rebalance max of ${pretty(maxAmount)} sats at max fee rate of ${maxFeeRate} ppm
     out of ${pretty(minUnbalanced)} sats left to balance for this pair
-    Previous rebalances: ${remoteRebalanceHistory}
+    Previous rebalances for remote-heavy channel: ${remoteRebalanceHistory}
   `)
 
   // Always lose money rebalancing remote heavy channel with fee rate lower than remote fee rate
@@ -1215,23 +1215,16 @@ const generateSnapshots = async () => {
   // ).length
 
   // const earnedSummary = await bos.getFeesChart({ days: DAYS_FOR_STATS })
-  const countsSummary = await bos.getFeesChart({
-    days: DAYS_FOR_STATS,
-    is_count: true
-  })
-  const tokensSummary = await bos.getFeesChart({
-    days: DAYS_FOR_STATS,
-    is_forwarded: true
-  })
+  // const countsSummary = await bos.getFeesChart({
+  //   days: DAYS_FOR_STATS,
+  //   is_count: true
+  // })
+  // const tokensSummary = await bos.getFeesChart({
+  //   days: DAYS_FOR_STATS,
+  //   is_forwarded: true
+  // })
   const chainFeesSummary = await bos.getChainFeesChart({ days: DAYS_FOR_STATS })
-  const paidFeesSummary = await bos.getFeesPaid({ days: DAYS_FOR_STATS })
-
-  const totalForwardsCount = countsSummary.data.reduce((t, v) => t + v, 0)
-  const totalRouted = tokensSummary.data.reduce((t, v) => t + v, 0)
-  const totalChainFees = chainFeesSummary.data.reduce((t, v) => t + v, 0)
-  const totalFeesPaid = paidFeesSummary.data.reduce((t, v) => t + v, 0)
-
-  const totalProfit = totalEarnedFromForwards - totalChainFees - totalFeesPaid
+  // const paidFeesSummary = await bos.getFeesPaid({ days: DAYS_FOR_STATS })
 
   const balances = await bos.getDetailedBalance()
 
@@ -1259,6 +1252,19 @@ const generateSnapshots = async () => {
     }
     return final
   }, {})
+
+  const totalForwardsCount = forwardsAll.length
+  const totalRouted = forwardsAll.reduce((t, f) => t + f.mtokens / 1000, 0)
+
+  // const totalForwardsCount = countsSummary.data.reduce((t, v) => t + v, 0)
+  // const totalRouted = tokensSummary.data.reduce((t, v) => t + v, 0)
+  // const totalFeesPaid = paidFeesSummary.data.reduce((t, v) => t + v, 0)
+
+  const totalChainFees = chainFeesSummary.data.reduce((t, v) => t + v, 0)
+
+  const totalFeesPaid = totalRebalancedFees
+
+  const totalProfit = totalEarnedFromForwards - totalChainFees - totalFeesPaid
 
   // prettier-ignore
   const summary = `${getDate()}
@@ -1308,15 +1314,15 @@ const generateSnapshots = async () => {
                                       ${pretty(forwardStats[String(1e11)].fee_mtokens / 1000)} sats earned
                                       ${pretty(forwardStats[String(1e11)].count)} count
 
-    peers used for routing-out:       ${totalPeersRoutingOut}
-    peers used for routing-in:        ${totalPeersRoutingIn}
+    peers used for routing-out:       ${totalPeersRoutingOut} / ${peers.length}
+    peers used for routing-in:        ${totalPeersRoutingIn} / ${peers.length}
     earned per peer stats:            ${statsEarnedPerPeer} sats
 
     LN received from others:          ${pretty(totalReceivedFromOthersLN)} sats (n: ${Object.keys(receivedFromOthersLN).length})
     LN payments to others:            ${pretty(totalSentToOthersLN)} sats, fees: ${pretty(totalSentToOthersFees)} sats (n: ${paidToOthersLN.length})
     LN total rebalanced:              ${pretty(totalRebalances)} sats, fees: ${pretty(totalRebalancedFees)} (n: ${rebalances.length})
 
-    % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}%
+    % routed/local                    ${(totalRouted / totalLocalSats * 100).toFixed(0)}%
     avg earned/routed ppm:            ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
     avg net-profit/routed ppm:        ${(totalProfit / totalRouted * 1e6).toFixed(0)} ppm
     avg earned/local ppm:             ${(totalEarnedFromForwards / totalLocalSats * 1e6).toFixed(0)} ppm
@@ -1370,8 +1376,9 @@ const generateSnapshots = async () => {
     //   .reduce((f, e) => `${f} ${e[0]}: ${+e[1].toFixed(2)} /`, '')
     //   .slice(0, -1)
     const rebalanceHistory = median(record.rebalance.filter(r => !r.failed).map(r => r.ppm))
+    const rebalanceSuggestionHistory = median(record.rebalance.map(r => r.ppm))
     const lastPpmChange = (record.feeChanges || [])[0]
-    const lastPpmChangeMinutes = lastPpmChange && (((lastPpmChange.t || 0) - Date.now()) / (1000 * 60)).toFixed(0)
+    const lastPpmChangeMinutes = lastPpmChange && ((Date.now() - (lastPpmChange.t || 0)) / (1000 * 60)).toFixed(0)
     const lastPpmChangeString =
       lastPpmChange && lastPpmChange.ppm_old
         ? `${lastPpmChange.ppm_old}->${lastPpmChange.ppm}ppm @ ${lastPpmChangeMinutes} minutes ago`
@@ -1380,8 +1387,8 @@ const generateSnapshots = async () => {
     const lastRoutedIn = (Date.now() - p.routed_in_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedInString =
       lastRoutedIn > DAYS_FOR_STATS
-        ? `routed-in: more than ${DAYS_FOR_STATS} days ago`.padStart(35)
-        : `routed-in: ${lastRoutedIn.toFixed(1)} days ago`.padStart(35)
+        ? `routed-in: more than ${DAYS_FOR_STATS} days ago`.padStart(23)
+        : `routed-in: ${lastRoutedIn.toFixed(1)} days ago`.padStart(23)
     const lastRoutedOut = (Date.now() - p.routed_out_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedOutString =
       lastRoutedOut > DAYS_FOR_STATS
@@ -1395,7 +1402,8 @@ const generateSnapshots = async () => {
       ${' '.repeat(15)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${p.balance.toFixed(2)}b ${p.flowMarginWeight}w ${p.flowMarginWeight > 0 ? '<--R_in!' : ''}${p.flowMarginWeight < 0 ? 'R_out!-->' : ''} ${twoWayRebalanceWarning}
       \x1b[2m${routeIn.padStart(26)} <---- routing ----> ${routeOut.padEnd(23)} +${routeOutEarned.padEnd(17)} ${routeInPpm.padStart(5)}|${routeOutPpm.padEnd(10)} ${('#' + p.routed_in_count).padStart(5)}|#${p.routed_out_count.toString().padEnd(5)}\x1b[0m
       \x1b[2m${rebIn.padStart(26)} <-- rebalancing --> ${rebOut.padEnd(23)} -${rebOutFees.padEnd(17)} ${rebInPpm.padStart(5)}|${rebOutPpm.padEnd(10)} ${('#' + p.rebalanced_in_count).padStart(5)}|#${p.rebalanced_out_count.toString().padEnd(5)}\x1b[0m
-      \x1b[2m${' '.repeat(17)}<-- Rebalaces-in cost rate (ppm): ${rebalanceHistory}\x1b[0m
+      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) used (ppm): ${rebalanceHistory}\x1b[0m
+      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) est. (ppm): ${rebalanceSuggestionHistory}\x1b[0m
       \x1b[2m${' '.repeat(17)}${lastRoutedInString}, ${lastRoutedOutString}, ${lastPpmChangeString || 'no ppm change data found'}\x1b[0m
     `
   }
@@ -1509,14 +1517,14 @@ const runBotConnectionCheck = async ({ quiet = false } = {}) => {
 
   // keep trying until internet connects
   if (!isInternetConnected) {
-    await sleep(2 * 60 * 1000) // every minute
+    await sleep(2 * 60 * 1000) // every few min
     return await runBotConnectionCheck()
   }
 
   // run bos reconnect
   await bos.reconnect(true)
 
-  await sleep(1 * 60 * 1000)
+  await sleep(2 * 60 * 1000)
 
   const peers = await runBotGetPeers({ all: true })
 
@@ -1642,7 +1650,7 @@ const initialize = async () => {
   await sleep(5 * 1000)
 
   // check if internet is connected
-  await runBotConnectionCheck({ quiet: true })
+  // await runBotConnectionCheck({ quiet: true })
 
   // start bot loop
   runBot()
