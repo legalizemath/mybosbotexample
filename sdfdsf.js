@@ -8,7 +8,7 @@ import bos from './bos.js' // wrapper for bos
 const { min, max, trunc, floor, abs, random, sqrt } = Math
 
 // time to sleep between trying a bot step again
-const MINUTES_BETWEEN_STEPS = 4
+const MINUTES_BETWEEN_STEPS = 1
 
 // minimum sats away from 0.5 balance to consider off-balance
 const MIN_SATS_OFF_BALANCE = 420e3
@@ -56,6 +56,12 @@ const MIN_FEE_RATE_FOR_REBALANCE = 10
 const NUDGE_UP = 0.021
 // max size of fee adjustment to target ppm (downward)
 const NUDGE_DOWN = 0.021
+
+// max days since last successful routing out to allow increasing fee
+const DAYS_FOR_FEE_INCREASE = 1.2
+// min days of no routing activity before allowing reduction in fees
+const DAYS_FOR_FEE_REDUCTION = 2.1 + DAYS_FOR_FEE_INCREASE
+
 // max minutes to spend per rebalance try
 const MINUTES_FOR_REBALANCE = 3
 // max minutes to spend per keysend try
@@ -71,11 +77,6 @@ const MINUTES_BETWEEN_FEE_CHANGES = 121
 // allow adjusting fees
 const ADJUST_FEES = true
 
-// max days since last successful routing out to allow increasing fee
-const DAYS_FOR_FEE_INCREASE = 1.2
-// min days of no routing activity before allowing reduction in fees
-const DAYS_FOR_FEE_REDUCTION = 2.1 + DAYS_FOR_FEE_INCREASE
-
 // how far back to look for routing stats (> DAYS_FOR_FEE_REDUCTION)
 const DAYS_FOR_STATS = 7
 
@@ -84,7 +85,7 @@ const DAYS_FOR_STATS = 7
 // stays here until I get enough data points
 const WORKED_WEIGHT = 10
 // min sample size before using rebalancing ppm rates for anything
-const MIN_SAMPLE_SIZE = 20
+const MIN_SAMPLE_SIZE = 12
 
 // fraction of peers that need to be offline to restart tor service
 const PEERS_OFFLINE_TO_RESET_TOR = 0.33
@@ -190,8 +191,9 @@ const findGoodPeer = async ({ localChannel, remoteChannel }) => {
   const peers = await runBotGetPeers()
 
   // get historic info if available
-  const logFile = BALANCING_LOG_PATH + '/' + remoteChannel.public_key.slice(0, 10) + '.json'
-  const logFileData = !fs.existsSync(logFile) ? {} : JSON.parse(fs.readFileSync(logFile)) || {}
+  const logFileData = readRecord(remoteChannel.public_key)
+  // const logFile = BALANCING_LOG_PATH + '/' + remoteChannel.public_key.slice(0, 10) + '.json'
+  // const logFileData = !fs.existsSync(logFile) ? {} : JSON.parse(fs.readFileSync(logFile)) || {}
 
   // remove balancing attempts below basic useful ppm
   const balancingData = logFileData.rebalance?.filter(b => b.ppm < ppmCheck) || []
@@ -248,13 +250,16 @@ const runBotGetPeers = async ({ all = false } = {}) => {
       })
     : await bos.peers()
 
+  // add to default peer data
   const peers = getPeers
     .map(p => {
       p.my_fee_rate = +getMyFees[p.public_key] || 0
       doBonusPeerCalcs(p)
       return p
     })
-    .filter(p => !p.is_offline || all) // remove offline peers if not all to be shown
+    // remove offline peers if not all to be shown
+    .filter(p => !p.is_offline || all)
+    // sort by local sats by default
     .sort((a, b) => b.outbound_liquidity - a.outbound_liquidity)
 
   // add some slow to change stats from most recent snapshot if available
@@ -403,6 +408,11 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
   }
 
   const rebalanceTime = doRebalanceInsteadOfKeysend ? MINUTES_FOR_REBALANCE : MINUTES_FOR_SEND
+  const remoteRebalanceHistory = median(
+    readRecord(remoteChannel.public_key)
+      .rebalance.filter(r => !r.failed)
+      .map(r => r.ppm)
+  )
 
   // prettier-ignore
   console.log(`${getDate()} ${rebalanceTime} minutes limit
@@ -415,13 +425,14 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
 
     Attempt to rebalance max of ${pretty(maxAmount)} sats at max fee rate of ${maxFeeRate} ppm
     out of ${pretty(minUnbalanced)} sats left to balance for this pair
+    Previous rebalances: ${remoteRebalanceHistory}
   `)
 
   // Always lose money rebalancing remote heavy channel with fee rate lower than remote fee rate
   if (maxFeeRate < remoteChannel.inbound_fee_rate) {
     const minimumAcceptable = addSafety(remoteChannel.inbound_fee_rate)
     console.log(`${getDate()}
-      Attempted balancing aborted at max of ${maxFeeRate}
+      Attempted balancing aborted at max of ${maxFeeRate} ppm:
         Remote-heavy "${remoteChannel.alias}" channel peer has higher
         incoming fee rate of ${remoteChannel.inbound_fee_rate} ppm.
         My fee rate should be at least ${minimumAcceptable.toFixed(0)} to justify it.
@@ -623,17 +634,18 @@ const updateFees = async () => {
       // only makes sense for remote heavy channel
       ppmFair = isRemoteHeavy(peer) ? peer.inbound_fee_rate : ppmFair
       // rebalancing estimates/suggestions include that so ok replacement
-      if (all.bottom25 && all.n >= MIN_SAMPLE_SIZE) ppmFair = all.bottom25
+      if (all.bottom25 && all.n >= MIN_SAMPLE_SIZE) ppmFair = all.bottom25 + 1
       // actually used rates better & more important
       if (worked.top75 && all.n >= MIN_SAMPLE_SIZE) {
-        ppmFair = (worked.top75 * worked.n * WORKED_WEIGHT + all.bottom25 * all.n) / (worked.n * WORKED_WEIGHT + all.n)
+        ppmFair =
+          (worked.top75 * worked.n * WORKED_WEIGHT + all.bottom25 * all.n) / (worked.n * WORKED_WEIGHT + all.n) + 1
       }
     }
 
     // add safety margin
     const ppmSafe = addSafety(ppmFair)
 
-    // add rules
+    // add rules & absolutes
     const applyRules = ppmIn => {
       ppmIn = rule?.min_ppm !== undefined ? max(rule.min_ppm, ppmIn) : ppmIn
       ppmIn = rule?.max_ppm !== undefined ? min(rule.max_ppm, ppmIn) : ppmIn
@@ -642,10 +654,9 @@ const updateFees = async () => {
     }
     const ppmRule = applyRules(ppmSafe)
 
-    // get rid of this
+    // get rid of this step possibly
     const ppmSane = trunc(ppmRule)
 
-    // const flowOut = peer.routed_out_msats
     const now = Date.now()
     const flowOutRecentDaysAgo = +((now - peer.routed_out_last_at) / (1000 * 60 * 60 * 24)).toFixed(1)
     const ppmOld = peer.my_fee_rate
@@ -670,12 +681,13 @@ const updateFees = async () => {
 
     if (isIncreasing) {
       nIncreased++
+      // at least +1
       const ppmStep = trunc(ppmOld * (1 - NUDGE_UP) + ppmSane * NUDGE_UP) + 1
 
       // prettier-ignore
-      console.log(feeChangeSummary +=
-        `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
-      )
+      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
+      feeChangeSummary += feeIncreaseLine
+      console.log(feeIncreaseLine)
 
       const resSetFee = await bos.setFees(peer.public_key, ppmStep)
 
@@ -697,7 +709,8 @@ const updateFees = async () => {
               ppm: resSetFee,
               // for ppm vs Fout data
               ppm_old: ppmOld,
-              routed_out_msats: peer.routed_out_msats
+              routed_out_msats: peer.routed_out_msats,
+              daysNoRouting: flowOutRecentDaysAgo
             },
             ...(logFileData?.feeChanges || [])
           ]
@@ -714,12 +727,13 @@ const updateFees = async () => {
         ? ppmSane // decrease to set point
         : applyRules(subtractSafety(ppmOld)) // just gradually decrease
 
+      // at least -1 (b/c of trunc)
       const ppmStep = trunc(ppmOld * (1 - NUDGE_DOWN) + ppmSetPoint * NUDGE_DOWN)
 
       // prettier-ignore
-      console.log(feeChangeSummary +=
-        `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
-      )
+      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
+      feeChangeSummary += feeDecreaseLine
+      console.log(feeDecreaseLine)
 
       const resSetFee = await bos.setFees(peer.public_key, ppmStep)
 
@@ -741,7 +755,8 @@ const updateFees = async () => {
               ppm: resSetFee,
               // for ppm vs Fout data
               ppm_old: ppmOld,
-              routed_out_msats: peer.routed_out_msats
+              routed_out_msats: peer.routed_out_msats,
+              daysNoRouting: flowOutRecentDaysAgo
             },
             ...(logFileData?.feeChanges || [])
           ]
@@ -753,9 +768,9 @@ const updateFees = async () => {
 
     // for no changes
     // prettier-ignore
-    console.log(feeChangeSummary +=
-      `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo}d`
-    )
+    const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo}d`
+    feeChangeSummary += feeNoChangeLine
+    console.log(feeNoChangeLine)
 
     appendRecord({
       peer,
@@ -770,18 +785,18 @@ const updateFees = async () => {
         }
       }
     })
-
-    // unchanging
   }
-  feeChangeSummary += '\n\n'
-  console.log(
-    (feeChangeSummary += `
+
+  feeChangeSummary += '\n'
+  const feeChangeTotals = `
     ${allPeers.length.toFixed(0).padStart(5, ' ')} peers
     ${peers.length.toFixed(0).padStart(5, ' ')} considered
     ${nIncreased.toFixed(0).padStart(5, ' ')} increased
     ${nDecreased.toFixed(0).padStart(5, ' ')} decreased
-  `)
-  )
+  `
+  feeChangeSummary += feeChangeTotals
+  console.log(feeChangeTotals)
+
   // make it available for review
   fs.writeFileSync(`${SUMMARIES}/${getDay()}_feeChanges.txt`, feeChangeSummary)
 }
@@ -803,6 +818,7 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }, log = fal
   // combine with new datapoint
   const combinedRebalanceData = [
     newRebalance,
+    // can remove filter and sort later
     ...(oldRecord?.rebalance?.filter(isNotEmpty).sort((a, b) => b.t - a.t) || [])
   ]
     .filter(isNotEmpty)
@@ -841,7 +857,7 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }, log = fal
 
   log &&
     console.log(`${getDate()} ${fullPath} "${peer.alias}" updated, ${combinedRebalanceData.length} records,
-    all:      ${JSON.stringify(ppmAll)}
+       all:   ${JSON.stringify(ppmAll)}
     worked:   ${JSON.stringify(ppmWorked)}
   `)
 }
@@ -1301,8 +1317,10 @@ const generateSnapshots = async () => {
     LN total rebalanced:              ${pretty(totalRebalances)} sats, fees: ${pretty(totalRebalancedFees)} (n: ${rebalances.length})
 
     % sats routed                     ${(totalRouted / totalLocalSats * 100).toFixed(0)}%
-    avg forwarded ppm:                ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
-    avg profit ppm:                   ${(totalProfit / totalLocalSats * 1e6).toFixed(0)} ppm
+    avg earned/routed ppm:            ${(totalEarnedFromForwards / totalRouted * 1e6).toFixed(0)} ppm
+    avg net-profit/routed ppm:        ${(totalProfit / totalRouted * 1e6).toFixed(0)} ppm
+    avg earned/local ppm:             ${(totalEarnedFromForwards / totalLocalSats * 1e6).toFixed(0)} ppm
+    avg net-profit/local ppm:         ${(totalProfit / totalLocalSats * 1e6).toFixed(0)} ppm
     est. annual ROI:                  ${(totalProfit / DAYS_FOR_STATS * 365.25 / totalLocalSats * 100).toFixed(3)} %
     est. annual profit:               ${pretty(totalProfit / DAYS_FOR_STATS * 365.25)} sats
   -------------------------------------------------------------
@@ -1326,7 +1344,9 @@ const generateSnapshots = async () => {
   `
   console.log(summary)
 
-  // by channel summary
+  // by channel flow rate summary
+  // sort by most to least flow total
+  peers.sort((a, b) => b.routed_out_msats + b.routed_in_msats - (a.routed_out_msats + a.routed_in_msats))
   let flowRateSummary = `${getDate()} - over ${DAYS_FOR_STATS} days\n`
   for (const p of peers) {
     const local = ((p.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(5, '-')
@@ -1349,26 +1369,34 @@ const generateSnapshots = async () => {
     // const ppmTargets = Object.entries(record.ppmTargets || {})
     //   .reduce((f, e) => `${f} ${e[0]}: ${+e[1].toFixed(2)} /`, '')
     //   .slice(0, -1)
-    const rebalanceHistory = median((record.rebalance || []).filter(r => !r.failed).map(r => r.ppm))
+    const rebalanceHistory = median(record.rebalance.filter(r => !r.failed).map(r => r.ppm))
+    const lastPpmChange = (record.feeChanges || [])[0]
+    const lastPpmChangeMinutes = lastPpmChange && (((lastPpmChange.t || 0) - Date.now()) / (1000 * 60)).toFixed(0)
+    const lastPpmChangeString =
+      lastPpmChange && lastPpmChange.ppm_old
+        ? `${lastPpmChange.ppm_old}->${lastPpmChange.ppm}ppm @ ${lastPpmChangeMinutes} minutes ago`
+        : ''
 
     const lastRoutedIn = (Date.now() - p.routed_in_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedInString =
       lastRoutedIn > DAYS_FOR_STATS
-        ? `last routed in more than ${DAYS_FOR_STATS} days ago`.padStart(35)
-        : `last routed in ${lastRoutedIn.toFixed(1)} days ago`.padStart(35)
+        ? `routed-in: more than ${DAYS_FOR_STATS} days ago`.padStart(35)
+        : `routed-in: ${lastRoutedIn.toFixed(1)} days ago`.padStart(35)
     const lastRoutedOut = (Date.now() - p.routed_out_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedOutString =
       lastRoutedOut > DAYS_FOR_STATS
-        ? `last routed out more than ${DAYS_FOR_STATS} days ago`
-        : `last routed out ${lastRoutedOut.toFixed(1)} days ago`
+        ? `routed-out: more than ${DAYS_FOR_STATS} days ago`
+        : `routed-out: ${lastRoutedOut.toFixed(1)} days ago`
+
+    const twoWayRebalanceWarning = p.rebalanced_out_msats > 0 && p.rebalanced_in_msats > 0 ? '🚨2WR' : ''
 
     // prettier-ignore
     flowRateSummary += `
-      ${' '.repeat(15)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${p.balance.toFixed(2)}b ${p.flowMarginWeight}w ${p.flowMarginWeight > 0 ? '<--R_in!' : ''}${p.flowMarginWeight < 0 ? 'R_out!-->' : ''}
+      ${' '.repeat(15)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${p.balance.toFixed(2)}b ${p.flowMarginWeight}w ${p.flowMarginWeight > 0 ? '<--R_in!' : ''}${p.flowMarginWeight < 0 ? 'R_out!-->' : ''} ${twoWayRebalanceWarning}
       \x1b[2m${routeIn.padStart(26)} <---- routing ----> ${routeOut.padEnd(23)} +${routeOutEarned.padEnd(17)} ${routeInPpm.padStart(5)}|${routeOutPpm.padEnd(10)} ${('#' + p.routed_in_count).padStart(5)}|#${p.routed_out_count.toString().padEnd(5)}\x1b[0m
       \x1b[2m${rebIn.padStart(26)} <-- rebalancing --> ${rebOut.padEnd(23)} -${rebOutFees.padEnd(17)} ${rebInPpm.padStart(5)}|${rebOutPpm.padEnd(10)} ${('#' + p.rebalanced_in_count).padStart(5)}|#${p.rebalanced_out_count.toString().padEnd(5)}\x1b[0m
       \x1b[2m${' '.repeat(17)}<-- Rebalaces-in cost rate (ppm): ${rebalanceHistory}\x1b[0m
-      \x1b[2m${' '.repeat(17)}${lastRoutedInString} / ${lastRoutedOutString}\x1b[0m
+      \x1b[2m${' '.repeat(17)}${lastRoutedInString}, ${lastRoutedOutString}, ${lastPpmChangeString || 'no ppm change data found'}\x1b[0m
     `
   }
   console.log(flowRateSummary)
@@ -1622,7 +1650,7 @@ const initialize = async () => {
 
 const subtractSafety = ppm => trunc(max(min(ppm - SAFETY_MARGIN_FLAT, ppm / SAFETY_MARGIN), 0))
 
-const addSafety = ppm => trunc(max(ppm + SAFETY_MARGIN_FLAT, ppm * SAFETY_MARGIN)) + 1
+const addSafety = ppm => trunc(max(ppm + SAFETY_MARGIN_FLAT, ppm * SAFETY_MARGIN))
 
 const isRemoteHeavy = p => p.unbalancedSatsSigned < -MIN_SATS_OFF_BALANCE
 
@@ -1656,7 +1684,7 @@ const sleep = async ms => {
   const seconds = ms / 1000
   const minutes = seconds / 60
   const t = minutes >= 1 ? minutes.toFixed(1) + ' minutes' : seconds.toFixed(1) + ' seconds'
-  console.log(`${getDate()}\n\n    Paused for ${t}, ctrl + c to exit\n\n`)
+  console.log(`${getDate()}\n\n    Paused for ${t}, ctrl + c to exit\n`)
   return await new Promise(resolve => setTimeout(resolve, trunc(ms)))
 }
 const stylingPatterns =
