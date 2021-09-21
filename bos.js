@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   linked via `npm link balanceofsatoshis`
-  Used with npm i -g balanceofsatoshis@10.14.0
+  Used with npm i -g balanceofsatoshis@10.18.1
 */
 
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
@@ -289,7 +289,8 @@ const callAPI = async (method, choices = {}, log = false) => {
     return await callRawApi({
       lnd: await mylnd(),
       method,
-      ask: (u, cbk) => cbk(null, choices)
+      ask: (u, cbk) => cbk(null, choices),
+      logger: logger(log)
     })
   } catch (e) {
     console.error(`${getDate()} bos.callAPI() aborted:`, e)
