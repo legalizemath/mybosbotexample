@@ -524,11 +524,12 @@ const customGetPaymentEvents = async (
     // get newer events
     const res = await callAPI('getPayments', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && console.boring(`${getDate()} this offset: ${nextOffset}`)
+    log && console.boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
     const payments = res.payments || [] // new to old
 
     if (payments.length === 0) break // done
+    if (!nextOffset) break // done
     if (!isRecent(payments[0].created_at)) break // pages now too old
 
     for (const paid of payments) {
@@ -615,13 +616,14 @@ const customGetReceivedEvents = async (
     // get newer events
     const res = await callAPI('getInvoices', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && console.boring(`${getDate()} this offset: ${nextOffset}`)
+    log && console.boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
 
     const payments = (res.invoices || []) // new to old
       .filter(p => p.is_confirmed) // just care about completed
 
     if (payments.length === 0) break // done
+    if (!nextOffset) break // done
 
     // if entire page now too old
     if (!isRecent(payments[0].confirmed_at)) break
