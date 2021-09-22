@@ -398,7 +398,7 @@ const customGetForwardingEvents = async (
     days = 1, // how many days ago to look back
     byInPeer = false, // use in-peers as keys instead of out-peers
     timeArray = false, // return as array of time points instead of object
-    max_minutes_search = 1 // safety if takes too long
+    max_minutes_search = 2 // safety if takes too long
   } = {},
   log = false
 ) => {
@@ -414,7 +414,7 @@ const customGetForwardingEvents = async (
   let page = 0
 
   // need a table to convert short channel id's to public keys
-  const getChannels = await callAPI('getChannels')
+  const getChannels = await callAPI('getChannels', {}, log)
   const idToPublicKey = {}
   getChannels.channels.forEach(channel => {
     idToPublicKey[channel.id] = channel.partner_public_key
@@ -422,9 +422,9 @@ const customGetForwardingEvents = async (
 
   while (Date.now() - started < max_minutes_search * 60 * 1000) {
     // get newer events
-    const res = await callAPI('getForwards', {
-      token: `{"offset":${pageSize * page++},"limit":${pageSize}}`
-    })
+    const thisOffset = `{"offset":${pageSize * page++},"limit":${pageSize}}`
+    const res = await callAPI('getForwards', { token: thisOffset })
+    log && console.boring(`${getDate()} this offset: ${thisOffset}`)
 
     const forwards = res.forwards || [] // new to old
 
@@ -494,7 +494,7 @@ const customGetForwardingEvents = async (
 const customGetPaymentEvents = async (
   {
     days = 1, // how many days ago to look back
-    max_minutes_search = 1, // safety if takes too long
+    max_minutes_search = 2, // safety if takes too long
     simplify = true, // remove failed attempts to save space
     destination = undefined, // filter out by public key destination,
     notDestination = undefined // filter out all payments to this destination
@@ -509,7 +509,7 @@ const customGetPaymentEvents = async (
 
   const byTime = []
 
-  const pageSize = 2000
+  const pageSize = 1000
   let nextOffset
 
   const isTimedOut = () => {
@@ -522,15 +522,9 @@ const customGetPaymentEvents = async (
 
   while (!isTimedOut()) {
     // get newer events
-    const res = await callAPI(
-      'getPayments',
-      !nextOffset
-        ? { limit: pageSize }
-        : {
-            token: nextOffset
-          }
-    )
+    const res = await callAPI('getPayments', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
+    log && console.boring(`${getDate()} this offset: ${nextOffset}`)
     nextOffset = res.next
     const payments = res.payments || [] // new to old
 
@@ -592,7 +586,7 @@ tokens, created_at_ms, confirmed_at_ms}]
 const customGetReceivedEvents = async (
   {
     days = 1, // how many days ago to look back
-    max_minutes_search = 1, // safety if takes too long
+    max_minutes_search = 2, // safety if takes too long
     idKeys = false // return object instead with ids as keys
   } = {},
   log = false
@@ -606,7 +600,7 @@ const customGetReceivedEvents = async (
   const byTime = []
   const byId = {}
 
-  const pageSize = 2000
+  const pageSize = 1000
   let nextOffset
 
   const isTimedOut = () => {
@@ -619,15 +613,9 @@ const customGetReceivedEvents = async (
 
   while (isTimedOut()) {
     // get newer events
-    const res = await callAPI(
-      'getInvoices',
-      !nextOffset
-        ? { limit: pageSize }
-        : {
-            token: nextOffset
-          }
-    )
+    const res = await callAPI('getInvoices', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
+    log && console.boring(`${getDate()} this offset: ${nextOffset}`)
     nextOffset = res.next
 
     const payments = (res.invoices || []) // new to old
