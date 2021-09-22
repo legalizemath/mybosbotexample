@@ -8,7 +8,7 @@ import bos from './bos.js' // wrapper for bos
 const { min, max, trunc, floor, abs, random, sqrt } = Math
 
 // time to sleep between trying a bot step again
-const MINUTES_BETWEEN_STEPS = 1
+const MINUTES_BETWEEN_STEPS = 2
 
 // minimum sats away from 0.5 balance to consider off-balance
 const MIN_SATS_OFF_BALANCE = 420e3
@@ -428,7 +428,7 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
     readRecord(remoteChannel.public_key)
       .rebalance.filter(r => !r.failed)
       .map(r => r.ppm)
-  )
+  ).s
 
   // prettier-ignore
   console.log(`${getDate()} ${rebalanceTime} minutes limit
@@ -602,6 +602,8 @@ const runUpdateFeesCheck = async () => {
 
 // logic for updating fees (v2)
 const updateFees = async () => {
+  if (!ADJUST_FEES) return null
+
   console.boring(`${getDate()} updateFees() v2`)
 
   // generate brand new snapshots
@@ -623,21 +625,54 @@ const updateFees = async () => {
   let feeChangeSummary = `${getDate()} Fee change summary`
 
   for (const peer of peers) {
+    // current stats
+    const now = Date.now()
+    const ppmOld = peer.my_fee_rate
+    const flowOutRecentDaysAgo = +((now - peer.routed_out_last_at) / (1000 * 60 * 60 * 24)).toFixed(1)
+    const logFileData = readRecord(peer.public_key)
+
     // check if there are rules about this peer
     const rule = getRuleFromSettings({ alias: peer.alias })
 
+    // check for any hard rule violations and instantly correct if found
+    let ruleFix = -1
+    if (rule?.min_ppm !== undefined && ppmOld < rule.min_ppm) {
+      ruleFix = rule.min_ppm
+      console.log(`${getDate()} ${peer.alias} : min_ppm rule requires change ${ppmOld} -> ${ruleFix} ppm`)
+    }
+    if (rule?.max_ppm !== undefined && ppmOld > rule.max_ppm) {
+      ruleFix = rule.max_ppm
+      console.log(`${getDate()} ${peer.alias} : max_ppm rule requires change ${ppmOld} -> ${ruleFix} ppm`)
+    }
+
+    // apply rule change if any found
+    if (ruleFix >= 0) {
+      const resSetFee = await bos.setFees(peer.public_key, ruleFix)
+      appendRecord({
+        peer,
+        newRecordData: {
+          lastFeeIncrease: now, // unique here
+          feeChanges: [
+            {
+              t: now,
+              ppm: resSetFee,
+              // for ppm vs Fout data
+              ppm_old: ppmOld,
+              routed_out_msats: peer.routed_out_msats,
+              daysNoRouting: flowOutRecentDaysAgo
+            },
+            ...(logFileData?.feeChanges || [])
+          ]
+        }
+      })
+      continue // move onto next peer
+    }
+
     // get historic rebalancing rate
-    const logFileData = readRecord(peer.public_key)
     const balancingData = logFileData.rebalance
     const usedBalancingData = balancingData.filter(b => b.failed === false)
-    const all = median(
-      balancingData.map(b => b.ppm),
-      { obj: true }
-    )
-    const worked = median(
-      usedBalancingData.map(b => b.ppm),
-      { obj: true }
-    )
+    const all = median(balancingData.map(b => b.ppm)).o
+    const worked = median(usedBalancingData.map(b => b.ppm)).o
 
     // rebalancing fee rate
     let ppmFair = 0
@@ -672,10 +707,6 @@ const updateFees = async () => {
     // get rid of this step possibly
     const ppmSane = trunc(ppmRule)
 
-    const now = Date.now()
-    const flowOutRecentDaysAgo = +((now - peer.routed_out_last_at) / (1000 * 60 * 60 * 24)).toFixed(1)
-    const ppmOld = peer.my_fee_rate
-
     const isIncreasing =
       ADJUST_FEES &&
       // sustainable flow fee rate higher
@@ -700,7 +731,7 @@ const updateFees = async () => {
       const ppmStep = trunc(ppmOld * (1 - NUDGE_UP) + ppmSane * NUDGE_UP) + 1
 
       // prettier-ignore
-      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
+      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d ${peer.balance.toFixed(1)}b`
       feeChangeSummary += feeIncreaseLine
       console.log(feeIncreaseLine)
 
@@ -746,7 +777,7 @@ const updateFees = async () => {
       const ppmStep = trunc(ppmOld * (1 - NUDGE_DOWN) + ppmSetPoint * NUDGE_DOWN)
 
       // prettier-ignore
-      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d`
+      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d  ${peer.balance.toFixed(1)}b`
       feeChangeSummary += feeDecreaseLine
       console.log(feeDecreaseLine)
 
@@ -783,7 +814,7 @@ const updateFees = async () => {
 
     // for no changes
     // prettier-ignore
-    const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo}d`
+    const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo}d  ${peer.balance.toFixed(1)}b`
     feeChangeSummary += feeNoChangeLine
     console.log(feeNoChangeLine)
 
@@ -842,14 +873,8 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }, log = fal
     .filter(r => addSafety(r.ppm) <= MAX_PPM_ABSOLUTE)
 
   // calculate median ppms
-  const ppmAll = median(
-    combinedRebalanceData.map(b => b.ppm),
-    { obj: true }
-  )
-  const ppmWorked = median(
-    combinedRebalanceData.filter(b => b.failed === false).map(b => b.ppm),
-    { obj: true }
-  )
+  const ppmAll = median(combinedRebalanceData.map(b => b.ppm)).o
+  const ppmWorked = median(combinedRebalanceData.filter(b => b.failed === false).map(b => b.ppm)).o
 
   // remove old data in future or weight higher recent data
 
@@ -1128,6 +1153,7 @@ const generateSnapshots = async () => {
     peer.is_inbound = networkingData[peer.public_key]?.is_inbound // who opened
     peer.ping_time = networkingData[peer.public_key]?.ping_time
     peer.reconnection_rate = networkingData[peer.public_key]?.reconnection_rate
+    peer.last_reconnection = networkingData[peer.public_key]?.last_reconnection
     // array of supported features 'bit type'
     peer.features = networkingData[peer.public_key]?.features?.map(f => `${f.bit} ${f.type}`)
 
@@ -1212,19 +1238,19 @@ const generateSnapshots = async () => {
 
   const totalSatsOffBalanceSigned = peers.reduce((sum, peer) => sum + peer.unbalancedSatsSigned, 0)
 
-  const baseFeesStats = median(getFeeRates.channels.map(d => +d.base_fee_mtokens))
-  const ppmFeesStats = median(getFeeRates.channels.map(d => d.fee_rate))
+  const baseFeesStats = median(getFeeRates.channels.map(d => +d.base_fee_mtokens)).s
+  const ppmFeesStats = median(getFeeRates.channels.map(d => d.fee_rate)).s
   const channelCapacityStats = median(
     getChannels.channels.map(d => d.capacity),
     { f: pretty }
-  )
+  ).s
 
   const totalEarnedFromForwards = peers.reduce((t, p) => t + p.routed_out_fees_msats, 0) / 1000
 
   const statsEarnedPerPeer = median(
     peers.filter(p => p.routed_out_last_at).map(p => p.routed_out_fees_msats / 1000),
     { f: pretty }
-  )
+  ).s
   // const totalEarnedFromForwards = getForwards.reduce(
   //   (sum, peer) => sum + (peer.earned_outbound_fees || 0),
   //   0
@@ -1431,15 +1457,29 @@ const generateSnapshots = async () => {
         ? `routed-out: more than ${DAYS_FOR_STATS} days ago`
         : `routed-out: ${lastRoutedOut.toFixed(1)} days ago`
 
-    const twoWayRebalanceWarning = p.rebalanced_out_msats > 0 && p.rebalanced_in_msats > 0 ? '🚨2WR' : ''
+    const issues = []
+
+    if (p.rebalanced_out_msats > 0 && p.rebalanced_in_msats > 0) issues.push('2WR')
+    // warning if fee is lower than needed for rebalancing on remote heavy channel with no flow in
+    if (
+      p.outbound_liquidity < 1e6 &&
+      p.capacity > MIN_CHAN_SIZE &&
+      p.routed_in_msats === 0 &&
+      rebalanceSuggestionHistory.o.median &&
+      addSafety(rebalanceSuggestionHistory.o.bottom25) > p.my_fee_rate
+    ) {
+      issues.push('FEE-STUCK-LOW')
+    }
+
+    const issuesString = issues.length > 0 ? '🚨 ' + issues.join(', ') : ''
 
     // prettier-ignore
     flowRateSummary += `${('#' + (i + 1)).padStart(4)} ${score(p).toFixed(0)}
-      ${' '.repeat(15)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${p.balance.toFixed(2)}b ${p.flowMarginWeight}w ${p.flowMarginWeight > 0 ? '<--R_in!' : ''}${p.flowMarginWeight < 0 ? 'R_out!-->' : ''} ${twoWayRebalanceWarning}
+      ${' '.repeat(15)}me  ${(p.my_fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${p.balance.toFixed(2)}b ${p.flowMarginWeight}w ${p.flowMarginWeight > 0 ? '<--R_in!' : ''}${p.flowMarginWeight < 0 ? 'R_out!-->' : ''} ${issuesString}
       \x1b[2m${routeIn.padStart(26)} <---- routing ----> ${routeOut.padEnd(23)} +${routeOutEarned.padEnd(17)} ${routeInPpm.padStart(5)}|${routeOutPpm.padEnd(10)} ${('#' + p.routed_in_count).padStart(5)}|#${p.routed_out_count.toString().padEnd(5)}\x1b[0m
       \x1b[2m${rebIn.padStart(26)} <-- rebalancing --> ${rebOut.padEnd(23)} -${rebOutFees.padEnd(17)} ${rebInPpm.padStart(5)}|${rebOutPpm.padEnd(10)} ${('#' + p.rebalanced_in_count).padStart(5)}|#${p.rebalanced_out_count.toString().padEnd(5)}\x1b[0m
-      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) used (ppm): ${rebalanceHistory}\x1b[0m
-      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) est. (ppm): ${rebalanceSuggestionHistory}\x1b[0m
+      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) used (ppm): ${rebalanceHistory.s}\x1b[0m
+      \x1b[2m${' '.repeat(17)}Rebalances-in (<--) est. (ppm): ${rebalanceSuggestionHistory.s}\x1b[0m
       \x1b[2m${' '.repeat(17)}${lastRoutedInString}, ${lastRoutedOutString}, ${lastPpmChangeString || 'no ppm change data found'}\x1b[0m
     `
   }
@@ -1739,6 +1779,14 @@ const sleep = async ms => {
   const minutes = seconds / 60
   const t = minutes >= 1 ? minutes.toFixed(1) + ' minutes' : seconds.toFixed(1) + ' seconds'
   console.log(`${getDate()}\n\n    Paused for ${t}, ctrl + c to exit\n`)
+
+  // easy script stop
+  if (fs.existsSync('pleasestop.json')) {
+    fs.unlinkSync('pleasestop.json')
+    console.log(`${getDate()} script terminaltion request via pleasestop.json granted`)
+    process.exit(0)
+  }
+
   return await new Promise(resolve => setTimeout(resolve, trunc(ms)))
 }
 const stylingPatterns =
@@ -1746,14 +1794,15 @@ const stylingPatterns =
   /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
 
 // returns mean, truncated fractions
-const median = (numbers = [], { obj = false, f = v => v } = {}) => {
+const median = (numbers = [], { f = v => v } = {}) => {
   const sorted = numbers
     .slice()
     .filter(v => !isNaN(v))
     .sort((a, b) => a - b)
   const n = sorted.length
   if (!numbers || numbers.length === 0 || n === 0) {
-    return !obj ? '(n: 0)' : { n: 0 }
+    // return !obj ? '(n: 0)' : { n: 0 }
+    return { s: '(n: 0)', o: { n: 0 } }
   }
   const middle = floor(sorted.length * 0.5)
   const middleTop = floor(sorted.length * 0.75)
@@ -1781,7 +1830,8 @@ const median = (numbers = [], { obj = false, f = v => v } = {}) => {
   const stringOutput =
     `(n: ${n}) min: ${bottom}, 1/4th: ${bottom25}, ` + `median: ${median}, avg: ${avg}, 3/4th: ${top75}, max: ${top}`
 
-  return !obj ? stringOutput : result
+  // return !obj ? stringOutput : result
+  return { s: stringOutput, o: result }
 }
 
 initialize()
