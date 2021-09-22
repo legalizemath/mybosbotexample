@@ -70,14 +70,11 @@ const MINUTES_FOR_SEND = 3 // ceil(MINUTES_FOR_REBALANCE / 2)
 const MIN_MINUTES_BETWEEN_SAME_PAIR = (MINUTES_BETWEEN_STEPS + MINUTES_FOR_REBALANCE) * 2
 // max repeats to balance if successful
 const MAX_BALANCE_REPEATS = 69
-// hours between running bos reconnect
-const MINUTES_BETWEEN_RECONNECTS = 69
-// how often to update fees
-const MINUTES_BETWEEN_FEE_CHANGES = 121
+
 // allow adjusting fees
 const ADJUST_FEES = true
 
-// how far back to look for routing stats (> DAYS_FOR_FEE_REDUCTION)
+// how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
 // weight for worked values, can be reduced to 1 and removed later
@@ -88,7 +85,14 @@ const WORKED_WEIGHT = 10
 const MIN_SAMPLE_SIZE = 12
 
 // fraction of peers that need to be offline to restart tor service
-const PEERS_OFFLINE_TO_RESET_TOR = 0.33
+const PEERS_OFFLINE_MAXIMUM = 0.33
+const ALLOW_BOS_RECONNECT = true
+const ALLOW_TOR_RESET = true
+
+// hours between running bos reconnect
+const MINUTES_BETWEEN_RECONNECTS = 69
+// how often to update fees
+const MINUTES_BETWEEN_FEE_CHANGES = 121
 
 // show everything
 const VERBOSE = true
@@ -113,7 +117,7 @@ const MIN_FLOWRATE_PER_DAY = 10000 // sats/day
 
 const SNAPSHOTS_PATH = './snapshots'
 const BALANCING_LOG_PATH = './peers'
-const SUMMARIES = './logs'
+const LOG_FILES = './logs'
 const TIMERS_PATH = 'timers.json'
 const SETTINGS_PATH = 'settings.json'
 
@@ -296,49 +300,50 @@ const runBotUpdatePeers = async oldPeers => {
   }
 }
 
+// allow these channels to be used as a remote heavy channel in a rebalance
+const includeForRemoteHeavyRebalance = p =>
+  // balance on remote side beyond min-off-balance or enough for max rebalance size
+  isRemoteHeavy(p) &&
+  // large enough channel
+  p.totalSats >= MIN_CHAN_SIZE &&
+  // enough sats to balance
+  p.unbalancedSats > MIN_REBALANCE_SATS &&
+  // only if no settings about it or if no setting for no remote-heavy rebalance true
+  !getRuleFromSettings({ alias: p.alias })?.no_remote_rebalance &&
+  // rebalance fee absurdly small
+  subtractSafety(p.my_fee_rate) > MIN_FEE_RATE_FOR_REBALANCE &&
+  // rebalance fee (max) should be larger than incoming fee rate
+  // or it's literally impossible since last hop costs more ppm already
+  subtractSafety(p.my_fee_rate) > p.inbound_fee_rate
+
+// allow these channels to be used as a local heavy channel in a rebalance
+const includeForLocalHeavyRebalance = p =>
+  // balance on my side beyond min-off-balance or enough for max rebalance size
+  isLocalHeavy(p) &&
+  p.totalSats >= MIN_CHAN_SIZE &&
+  p.unbalancedSats > MIN_REBALANCE_SATS &&
+  // only if no settings about it or if no setting for no local-heavy rebalance true
+  !getRuleFromSettings({ alias: p.alias })?.no_local_rebalance
+
+// pick random remote heavy and random local heavy channel using weight setting
 const runBotPickRandomPeers = async () => {
   console.boring(`${getDate()} runBotPickRandomPeers()`)
 
-  // get all peers to compare
+  // get list of all peers and active peers to check if enough are online
   const allPeers = await runBotGetPeers({ all: true })
-  // get all useful peers
   const peers = await runBotGetPeers()
 
   // check if too many peers are offline // testing
   console.boring(`${getDate()} Online peers: ${peers.length} / ${allPeers.length}`)
-  if (1 - peers.length / allPeers.length > PEERS_OFFLINE_TO_RESET_TOR) {
+  if (1 - peers.length / allPeers.length > PEERS_OFFLINE_MAXIMUM) {
     console.log(`${getDate()} too many peers offline.`)
-
     await runBotConnectionCheck()
     return await runBotPickRandomPeers()
   }
 
   // make a list of remote heavy and local heavy peers via balance check
-  const remoteHeavyPeers = peers.filter(
-    p =>
-      // balance on remote side beyond min-off-balance or enough for max rebalance size
-      isRemoteHeavy(p) &&
-      // large enough channel
-      p.totalSats >= MIN_CHAN_SIZE &&
-      // enough sats to balance
-      p.unbalancedSats > MIN_REBALANCE_SATS &&
-      // only if no settings about it or if no setting for no remote-heavy rebalance true
-      !getRuleFromSettings({ alias: p.alias })?.no_remote_rebalance &&
-      // rebalance fee absurdly small
-      subtractSafety(p.my_fee_rate) > MIN_FEE_RATE_FOR_REBALANCE &&
-      // rebalance fee (max) should be larger than incoming fee rate
-      // or it's literally impossible since last hop costs more ppm already
-      subtractSafety(p.my_fee_rate) > p.inbound_fee_rate
-  )
-  const localHeavyPeers = peers.filter(
-    p =>
-      // balance on my side beyond min-off-balance or enough for max rebalance size
-      isLocalHeavy(p) &&
-      p.totalSats >= MIN_CHAN_SIZE &&
-      p.unbalancedSats > MIN_REBALANCE_SATS &&
-      // only if no settings about it or if no setting for no local-heavy rebalance true
-      !getRuleFromSettings({ alias: p.alias })?.no_local_rebalance
-  )
+  const remoteHeavyPeers = peers.filter(includeForRemoteHeavyRebalance)
+  const localHeavyPeers = peers.filter(includeForLocalHeavyRebalance)
 
   // nothing to pair up
   if (remoteHeavyPeers.length === 0 || localHeavyPeers.length === 0) return {}
@@ -716,6 +721,7 @@ const updateFees = async () => {
 
     const isDecreasing =
       ADJUST_FEES &&
+      ppmSane !== ppmOld &&
       // sustainable flow fee rate lower for outflowing peers (careful with these as profit makers)
       // and decrease whenever possible for inflowing peers (obviously not stuck remote heavy)
       ((!isIncreasing && !isNetOutflowing(peer)) || (ppmSane < ppmOld && isNetOutflowing(peer))) &&
@@ -844,8 +850,8 @@ const updateFees = async () => {
   console.log(feeChangeTotals)
 
   // make it available for review
-  fs.writeFileSync(`${SUMMARIES}/${getDay()}_feeChanges.txt`, feeChangeSummary)
-  fs.writeFileSync('feeChanges.txt', feeChangeSummary)
+  fs.writeFileSync(`${LOG_FILES}/${getDay()}_feeChanges.txt`, feeChangeSummary)
+  fs.writeFileSync('_feeChanges.txt', feeChangeSummary)
 }
 
 // keep track of peers rebalancing attempts in files
@@ -1053,10 +1059,23 @@ const generateSnapshots = async () => {
   // now forwardsSum has rebalance inflow and outflow info by each channel as key
 
   // payments and received payments
-  // get all payments
+  // get all payments from db
   const getPaymentEvents = await bos.customGetPaymentEvents({
     days: DAYS_FOR_STATS
   })
+  // payments can be deleted so scan log file backups
+  const res = fs.readdirSync(LOG_FILES) || []
+  const paymentLogFiles = res.filter(f => f.match(/_paymentHistory/))
+  const isRecent = t => Date.now() - t < DAYS_FOR_STATS * 24 * 60 * 60 * 1000
+  VERBOSE && console.boring(`${getDate()} ${getPaymentEvents.length} payment records found in db`)
+  for (const fileName of paymentLogFiles) {
+    const timestamp = fileName.split('_')[0]
+    if (!isRecent(timestamp)) continue // log file older than oldest needed record
+    const payments = JSON.parse(fs.readFileSync(`${LOG_FILES}/${fileName}`))
+    getPaymentEvents.push(...payments.filter(p => isRecent(p.created_at_ms)))
+    VERBOSE && console.boring(`${getDate()} ${getPaymentEvents.length} payment records after log file`)
+  }
+
   // get all received funds
   const getReceivedEvents = await bos.customGetReceivedEvents({
     days: DAYS_FOR_STATS,
@@ -1495,7 +1514,7 @@ const generateSnapshots = async () => {
   // rebalances sums by peer
   fs.writeFileSync(`${SNAPSHOTS_PATH}/rebalancesSum.json`, JSON.stringify(rebalancesByPeer, fixJSON, 2))
   // highly detailed peer info
-  fs.writeFileSync(`${SUMMARIES}/${getDay()}_peers.json`, JSON.stringify(peers, fixJSON, 2))
+  fs.writeFileSync(`${LOG_FILES}/${getDay()}_peers.json`, JSON.stringify(peers, fixJSON, 2))
   fs.writeFileSync(`${SNAPSHOTS_PATH}/peers.json`, JSON.stringify(peers, fixJSON, 2))
   // public key to peers.json index lookup table
   fs.writeFileSync(
@@ -1511,11 +1530,11 @@ const generateSnapshots = async () => {
   )
 
   // flow rates summary
-  fs.writeFileSync(`${SUMMARIES}/${getDay()}_flowSummary.txt`, flowRateSummary.replace(stylingPatterns, ''))
-  fs.writeFileSync('flowSummary.txt', flowRateSummary.replace(stylingPatterns, ''))
+  fs.writeFileSync(`${LOG_FILES}/${getDay()}_flowSummary.txt`, flowRateSummary.replace(stylingPatterns, ''))
+  fs.writeFileSync('_flowSummary.txt', flowRateSummary.replace(stylingPatterns, ''))
   // node summary
-  fs.writeFileSync(`${SUMMARIES}/${getDay()}_nodeSummary.txt`, summary)
-  fs.writeFileSync('nodeSummary.txt', summary)
+  fs.writeFileSync(`${LOG_FILES}/${getDay()}_nodeSummary.txt`, summary)
+  fs.writeFileSync('_nodeSummary.txt', summary)
 
   // too much data to write constantly
   // fs.writeFileSync(
@@ -1608,7 +1627,7 @@ const runBotConnectionCheck = async ({ quiet = false } = {}) => {
   }
 
   // run bos reconnect
-  await bos.reconnect(true)
+  if (ALLOW_BOS_RECONNECT) await bos.reconnect(true)
 
   await sleep(2 * 60 * 1000)
 
@@ -1632,7 +1651,10 @@ const runBotConnectionCheck = async ({ quiet = false } = {}) => {
     bos.sayWithTelegramBot({ token, chat_id, message })
   }
 
-  if (peersOffline.length / peersTotal <= PEERS_OFFLINE_TO_RESET_TOR) return 0 // all good
+  // skip if set to not reset tor or unused
+  if (!ALLOW_TOR_RESET) return 0
+  // all good
+  if (peersOffline.length / peersTotal <= PEERS_OFFLINE_MAXIMUM) return 0
 
   console.log(`${getDate()} Restarting tor...`)
 
@@ -1713,8 +1735,8 @@ const initialize = async () => {
   if (!fs.existsSync(SNAPSHOTS_PATH)) {
     fs.mkdirSync(SNAPSHOTS_PATH, { recursive: true })
   }
-  if (!fs.existsSync(SUMMARIES)) {
-    fs.mkdirSync(SUMMARIES, { recursive: true })
+  if (!fs.existsSync(LOG_FILES)) {
+    fs.mkdirSync(LOG_FILES, { recursive: true })
   }
 
   // load settings file
@@ -1781,9 +1803,9 @@ const sleep = async ms => {
   console.log(`${getDate()}\n\n    Paused for ${t}, ctrl + c to exit\n`)
 
   // easy script stop
-  if (fs.existsSync('pleasestop.json')) {
-    fs.unlinkSync('pleasestop.json')
-    console.log(`${getDate()} script terminaltion request via pleasestop.json granted`)
+  if (fs.existsSync('PLEASESTOP.json')) {
+    fs.unlinkSync('PLEASESTOP.json')
+    console.log(`${getDate()} script terminaltion request via PLEASESTOP.json granted`)
     process.exit(0)
   }
 
