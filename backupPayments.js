@@ -2,7 +2,7 @@ import fs from 'fs'
 import bos from './bos.js'
 
 const LOG_FILES = './logs'
-const DAYS_FOR_STATS = 7
+const DAYS_FOR_STATS = 999 // enough to capture all payments needed before deletion
 
 const initialize = async () => {
   // make folder if necessary
