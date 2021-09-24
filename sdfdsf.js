@@ -17,7 +17,6 @@ const MIN_SATS_OFF_BALANCE = 420e3
 const MAX_REBALANCE_SATS = MIN_SATS_OFF_BALANCE
 // unbalanced sats below this can stop (bos rebalance exits <50k)
 const MIN_REBALANCE_SATS = 51e3
-
 // sats to balance via keysends
 const MAX_REBALANCE_SATS_SEND = 212121
 // rebalance with faster keysends after bos rebalance works
@@ -31,26 +30,25 @@ const USE_KEYSENDS_AFTER_BALANCE = true
 const MIN_CHAN_SIZE = 5 * (MIN_REBALANCE_SATS + MIN_SATS_OFF_BALANCE)
 
 // multiplier for proportional safety ppm margin
-const SAFETY_MARGIN = 1.15
+const SAFETY_MARGIN = 2 // 1.15
 // minimum flat safety ppm margin & min for remote heavy channels
 const SAFETY_MARGIN_FLAT = 222
+// minimum ppm ever possible
+const MIN_PPM_ABSOLUTE = 0
+// rebalancing fee rates below this aren't considered for rebalancing
+const MIN_FEE_RATE_FOR_REBALANCE = 1
+// any ppm above this is not considered for fees, rebalancing, or suggestions
+const MAX_PPM_ABSOLUTE = 2992
+
 // as 0-profit fee rate increases, fee rate where where proportional
 // fee takes over flat one is
 // (break even fee rate) * SAFETY_MARGIN = SAFETY_MARGIN_FLAT
 
-// smallest amount of sats to keep on each side ideally
-// const MIN_SATS_PER_SIDE = 1000e3
-
-// minimum ppm ever possible
-const MIN_PPM_ABSOLUTE = 0
+// smallest amount of sats necessary to consider a side not drained
+const MIN_SATS_PER_SIDE = 1000e3
 
 // how much error to use for balance calcs
 // const BALANCE_DEV = 0.1
-
-// any ppm above this is not considered for fees, rebalancing, or suggestions
-const MAX_PPM_ABSOLUTE = 2992
-// rebalancing fee rates below this aren't considered for rebalancing
-const MIN_FEE_RATE_FOR_REBALANCE = 1
 
 // max size of fee adjustment to target ppm (upward)
 const NUDGE_UP = 0.021
@@ -58,7 +56,7 @@ const NUDGE_UP = 0.021
 const NUDGE_DOWN = 0.021
 
 // max days since last successful routing out to allow increasing fee
-const DAYS_FOR_FEE_INCREASE = 1.2
+const DAYS_FOR_FEE_INCREASE = 2.1
 // min days of no routing activity before allowing reduction in fees
 const DAYS_FOR_FEE_REDUCTION = 2.1
 
@@ -77,12 +75,10 @@ const ADJUST_FEES = true
 // how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
-// weight for worked values, can be reduced to 1 and removed later
-// now that I count every worked rebalance should become large number anyway
-// stays here until I get enough data points
-const WORKED_WEIGHT = 10
+// weight multiplier for rebalancing rates that were actually used vs suggested
+const WORKED_WEIGHT = 5
 // min sample size before using rebalancing ppm rates for anything
-const MIN_SAMPLE_SIZE = 12
+const MIN_SAMPLE_SIZE = 7
 
 // fraction of peers that need to be offline to restart tor service
 const PEERS_OFFLINE_MAXIMUM = 0.33
@@ -310,7 +306,7 @@ const includeForRemoteHeavyRebalance = p =>
   p.unbalancedSats > MIN_REBALANCE_SATS &&
   // only if no settings about it or if no setting for no remote-heavy rebalance true
   !getRuleFromSettings({ alias: p.alias })?.no_remote_rebalance &&
-  // rebalance fee absurdly small
+  // supposed rebalance fee unrealistically small
   subtractSafety(p.my_fee_rate) > MIN_FEE_RATE_FOR_REBALANCE &&
   // rebalance fee (max) should be larger than incoming fee rate
   // or it's literally impossible since last hop costs more ppm already
@@ -722,6 +718,8 @@ const updateFees = async () => {
     const isDecreasing =
       ADJUST_FEES &&
       ppmSane !== ppmOld &&
+      // safer to just skip VERY-remote-heavy channels to avoid false measurements of 0 flow out
+      !isVeryRemoteHeavy(peer) &&
       // sustainable flow fee rate lower for outflowing peers (careful with these as profit makers)
       // and decrease whenever possible for inflowing peers (obviously not stuck remote heavy)
       ((!isIncreasing && !isNetOutflowing(peer)) || (ppmSane < ppmOld && isNetOutflowing(peer))) &&
@@ -1378,21 +1376,17 @@ const generateSnapshots = async () => {
 
     forwards stats by size:
 
-          0 - 100 sats                ${pretty(forwardStats[String(1e5)].mtokens / 1000)} sats routed
-                                      ${pretty(forwardStats[String(1e5)].fee_mtokens / 1000)} sats earned
-                                      ${pretty(forwardStats[String(1e5)].count)} count
+          0 - 100 sats                ${(pretty(forwardStats[String(1e5)].mtokens / 1000) + ' sats routed').padEnd(26)} (n: ${pretty(forwardStats[String(1e5)].count)})
+                                      ${(pretty(forwardStats[String(1e5)].fee_mtokens / 1000) + ' sats earned').padEnd(26)} (${pretty(forwardStats[String(1e5)].fee_mtokens / forwardStats[String(1e5)].mtokens * 1e6)} ppm)
 
-        100 - 10k sats                ${pretty(forwardStats[String(1e7)].mtokens / 1000)} sats routed
-                                      ${pretty(forwardStats[String(1e7)].fee_mtokens / 1000)} sats earned
-                                      ${pretty(forwardStats[String(1e7)].count)} count
+        100 - 10k sats                ${(pretty(forwardStats[String(1e7)].mtokens / 1000) + ' sats routed').padEnd(26)} (n: ${pretty(forwardStats[String(1e7)].count)})
+                                      ${(pretty(forwardStats[String(1e7)].fee_mtokens / 1000) + ' sats earned').padEnd(26)} (${pretty(forwardStats[String(1e7)].fee_mtokens / forwardStats[String(1e7)].mtokens * 1e6)} ppm)
 
-        10k - 1M sats                 ${pretty(forwardStats[String(1e9)].mtokens / 1000)} sats routed
-                                      ${pretty(forwardStats[String(1e9)].fee_mtokens / 1000)} sats earned
-                                      ${pretty(forwardStats[String(1e9)].count)} count
+        10k - 1M sats                 ${(pretty(forwardStats[String(1e9)].mtokens / 1000) + ' sats routed').padEnd(26)} (n: ${pretty(forwardStats[String(1e9)].count)})
+                                      ${(pretty(forwardStats[String(1e9)].fee_mtokens / 1000) + ' sats earned').padEnd(26)} (${pretty(forwardStats[String(1e9)].fee_mtokens / forwardStats[String(1e9)].mtokens * 1e6)} ppm)
 
-         1M - 100M sats               ${pretty(forwardStats[String(1e11)].mtokens / 1000)} sats routed
-                                      ${pretty(forwardStats[String(1e11)].fee_mtokens / 1000)} sats earned
-                                      ${pretty(forwardStats[String(1e11)].count)} count
+         1M - 100M sats               ${(pretty(forwardStats[String(1e11)].mtokens / 1000) + ' sats routed').padEnd(26)} (n: ${pretty(forwardStats[String(1e11)].count)})
+                                      ${(pretty(forwardStats[String(1e11)].fee_mtokens / 1000) + ' sats earned').padEnd(26)} (${pretty(forwardStats[String(1e11)].fee_mtokens / forwardStats[String(1e11)].mtokens * 1e6)} ppm)
 
     peers used for routing-out:       ${totalPeersRoutingOut} / ${peers.length}
     peers used for routing-in:        ${totalPeersRoutingIn} / ${peers.length}
@@ -1502,7 +1496,8 @@ const generateSnapshots = async () => {
       \x1b[2m${' '.repeat(17)}${lastRoutedInString}, ${lastRoutedOutString}, ${lastPpmChangeString || 'no ppm change data found'}\x1b[0m
     `
   }
-  console.log(flowRateSummary)
+  // too much screen space, easier to look up from file
+  // console.log(flowRateSummary)
 
   // write LN state snapshot to files
   fs.writeFileSync(`${SNAPSHOTS_PATH}/channelOnChainInfo.json`, JSON.stringify(channelOnChainInfo, fixJSON, 2))
@@ -1764,9 +1759,12 @@ const initialize = async () => {
   runBot()
 }
 
-const subtractSafety = ppm => trunc(max(min(ppm - SAFETY_MARGIN_FLAT, ppm / SAFETY_MARGIN), 0))
+// const subtractSafety = ppm => trunc(max(min(ppm - SAFETY_MARGIN_FLAT, ppm / SAFETY_MARGIN), 0))
+// const addSafety = ppm => trunc(max(ppm + SAFETY_MARGIN_FLAT, ppm * SAFETY_MARGIN))
 
-const addSafety = ppm => trunc(max(ppm + SAFETY_MARGIN_FLAT, ppm * SAFETY_MARGIN))
+const addSafety = ppm => trunc(min(ppm * SAFETY_MARGIN + MIN_FEE_RATE_FOR_REBALANCE, ppm + SAFETY_MARGIN_FLAT))
+const subtractSafety = ppm =>
+  trunc(max((ppm - MIN_FEE_RATE_FOR_REBALANCE) / SAFETY_MARGIN, ppm - SAFETY_MARGIN_FLAT, 0))
 
 const isRemoteHeavy = p => p.unbalancedSatsSigned < -MIN_SATS_OFF_BALANCE
 
@@ -1779,12 +1777,11 @@ const isNetInflowing = p => p.routed_out_msats - p.routed_in_msats < 0
 // const isVeryLocalHeavy = p =>
 //   1.0 - p.balance < BALANCE_DEV || p.outbound_liquidity < MIN_SATS_PER_SIDE
 
-// const isVeryRemoteHeavy = p =>
-//   p.balance < BALANCE_DEV || p.inbound_liquidity < MIN_SATS_PER_SIDE
+const isVeryRemoteHeavy = p => p.inbound_liquidity < MIN_SATS_PER_SIDE
 
 // const isBalanced = p =>
 
-const pretty = n => String(trunc(n)).replace(/\B(?=(\d{3})+\b)/g, '_')
+const pretty = n => String(trunc(n || 0)).replace(/\B(?=(\d{3})+\b)/g, '_')
 
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 const getDay = () => new Date().toISOString().slice(0, 10)
