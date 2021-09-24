@@ -51,12 +51,12 @@ const MIN_SATS_PER_SIDE = 1000e3
 // const BALANCE_DEV = 0.1
 
 // max size of fee adjustment to target ppm (upward)
-const NUDGE_UP = 0.021
+const NUDGE_UP = 0.0042
 // max size of fee adjustment to target ppm (downward)
-const NUDGE_DOWN = 0.021
+const NUDGE_DOWN = 0.0042
 
 // max days since last successful routing out to allow increasing fee
-const DAYS_FOR_FEE_INCREASE = 2.1
+const DAYS_FOR_FEE_INCREASE = 1.2
 // min days of no routing activity before allowing reduction in fees
 const DAYS_FOR_FEE_REDUCTION = 2.1
 
@@ -76,9 +76,9 @@ const ADJUST_FEES = true
 const DAYS_FOR_STATS = 7
 
 // weight multiplier for rebalancing rates that were actually used vs suggested
-const WORKED_WEIGHT = 5
+// const WORKED_WEIGHT = 5
 // min sample size before using rebalancing ppm rates for anything
-const MIN_SAMPLE_SIZE = 7
+// const MIN_SAMPLE_SIZE = 3
 
 // fraction of peers that need to be offline to restart tor service
 const PEERS_OFFLINE_MAXIMUM = 0.33
@@ -445,31 +445,6 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
     Previous rebalances for remote-heavy channel: ${remoteRebalanceHistory}
   `)
 
-  // filtered out beforehand now
-  // Always lose money rebalancing remote heavy channel with fee rate lower than remote fee rate
-  // if (maxFeeRate < remoteChannel.inbound_fee_rate) {
-  //   const minimumAcceptable = addSafety(remoteChannel.inbound_fee_rate)
-  //   console.log(`${getDate()}
-  //     Attempted balancing aborted at max of ${maxFeeRate} ppm:
-  //       Remote-heavy "${remoteChannel.alias}" channel peer has higher
-  //       incoming fee rate of ${remoteChannel.inbound_fee_rate} ppm.
-  //       My fee rate should be at least ${minimumAcceptable.toFixed(0)} to justify it.
-  //   `)
-  //   // appendRecord({
-  //   //   peer: remoteChannel,
-  //   //   newRebalance: {
-  //   //     t: Date.now(),
-  //   //     ppm: minimumAcceptable,
-  //   //     failed: true,
-  //   //     peer: localChannel.public_key,
-  //   //     peerAlias: localChannel.alias,
-  //   //     sats: maxAmount,
-  //   //     belowPeer: true // unique flag for this
-  //   //   }
-  //   // })
-  //   return { failed: true }
-  // }
-
   // do the rebalance
   // switch to keysends if that setting is on && not first run
   const resBalance = doRebalanceInsteadOfKeysend
@@ -601,8 +576,156 @@ const runUpdateFeesCheck = async () => {
   }
 }
 
-// logic for updating fees (v2)
+// logic for updating fees (v3)
 const updateFees = async () => {
+  console.boring(`${getDate()} updateFees() v3`)
+
+  // generate brand new snapshots
+  const allPeers = await generateSnapshots()
+  // adjust fees for these channels
+  const peers = allPeers.filter(
+    p =>
+      !p.is_offline &&
+      !p.is_pending &&
+      !p.is_private &&
+      p.is_active &&
+      // leave small channels alone
+      p.totalSats > MIN_CHAN_SIZE
+  )
+
+  let nIncreased = 0
+  let nDecreased = 0
+
+  let feeChangeSummary = `${getDate()} Fee change summary`
+
+  for (const peer of peers) {
+    // current stats
+    const now = Date.now()
+    const ppmOld = peer.my_fee_rate
+    const flowOutRecentDaysAgo = +((now - peer.routed_out_last_at) / (1000 * 60 * 60 * 24)).toFixed(1)
+    const logFileData = readRecord(peer.public_key)
+
+    // check if there are rules about this peer
+    const rule = getRuleFromSettings({ alias: peer.alias })
+    // check for any hard rule violations and instantly correct if found
+    let ruleFix = -1
+    if (rule?.min_ppm !== undefined && ppmOld < rule.min_ppm) ruleFix = rule.min_ppm
+    if (rule?.max_ppm !== undefined && ppmOld > rule.max_ppm) ruleFix = rule.max_ppm
+    // apply rule change if any found
+    if (ruleFix >= 0) {
+      console.log(`${getDate()} ${peer.alias} : rule required change ${ppmOld} -> ${ruleFix} ppm`)
+      const resSetFee = await bos.setFees(peer.public_key, ruleFix)
+      appendRecord({
+        peer,
+        newRecordData: {
+          lastFeeIncrease: now, // unique here
+          feeChanges: [
+            {
+              t: now,
+              ppm: resSetFee,
+              // for ppm vs Fout data
+              ppm_old: ppmOld,
+              routed_out_msats: peer.routed_out_msats,
+              daysNoRouting: flowOutRecentDaysAgo
+            },
+            ...(logFileData?.feeChanges || [])
+          ]
+        }
+      })
+      continue // move onto next peer
+    }
+
+    const applyRules = ppmIn => {
+      ppmIn = rule?.min_ppm !== undefined ? max(rule.min_ppm, ppmIn) : ppmIn
+      ppmIn = rule?.max_ppm !== undefined ? min(rule.max_ppm, ppmIn) : ppmIn
+      ppmIn = max(min(MAX_PPM_ABSOLUTE, ppmIn), MIN_PPM_ABSOLUTE)
+      return trunc(ppmIn)
+    }
+
+    const isIncreasing = ADJUST_FEES && flowOutRecentDaysAgo < DAYS_FOR_FEE_INCREASE
+
+    const isDecreasing =
+      ADJUST_FEES &&
+      !isIncreasing &&
+      flowOutRecentDaysAgo > DAYS_FOR_FEE_REDUCTION &&
+      // safer to just skip VERY-remote-heavy channels to avoid false measurements of 0 flow out
+      !isVeryRemoteHeavy(peer)
+
+    const flowString = `${isNetOutflowing(peer) ? 'outflowing' : isNetInflowing(peer) ? ' inflowing' : '   no flow'}`
+    feeChangeSummary += '\n'
+
+    let ppmNew = ppmOld
+
+    if (isIncreasing) {
+      nIncreased++
+      // at least +1
+      ppmNew = applyRules(ppmOld * (1 + NUDGE_UP)) + 1
+
+      // prettier-ignore
+      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNew.toFixed(0).padEnd(6)} ppm (-> ${(ppmNew + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d ${peer.balance.toFixed(1)}b`
+      feeChangeSummary += feeIncreaseLine
+      console.log(feeIncreaseLine)
+
+      ppmNew = await bos.setFees(peer.public_key, ppmNew)
+    } else if (isDecreasing) {
+      nDecreased++
+      // at least -1 (b/c of trunc)
+      ppmNew = applyRules(ppmOld * (1 - NUDGE_DOWN))
+
+      // prettier-ignore
+      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNew.toFixed(0).padEnd(6)} ppm (-> ${(ppmNew + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d  ${peer.balance.toFixed(1)}b`
+      feeChangeSummary += feeDecreaseLine
+      console.log(feeDecreaseLine)
+
+      ppmNew = await bos.setFees(peer.public_key, ppmNew)
+    } else {
+      // for no changes
+      // prettier-ignore
+      const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmOld + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d  ${peer.balance.toFixed(1)}b`
+      feeChangeSummary += feeNoChangeLine
+      console.log(feeNoChangeLine)
+    }
+
+    // update record
+    appendRecord({
+      peer,
+      newRecordData: {
+        ppmTargets: { ppmNew, daysNoRouting: flowOutRecentDaysAgo },
+        feeChanges: [
+          {
+            t: now,
+            ppm: ppmNew,
+            // for ppm vs Fout data
+            ppm_old: ppmOld,
+            routed_out_msats: peer.routed_out_msats,
+            daysNoRouting: flowOutRecentDaysAgo
+          },
+          ...(logFileData?.feeChanges || [])
+        ]
+      }
+    })
+  }
+
+  feeChangeSummary += '\n'
+  const feeChangeTotals = `
+    ${allPeers.length.toFixed(0).padStart(5, ' ')} peers
+    ${peers.length.toFixed(0).padStart(5, ' ')} considered
+    ${nIncreased.toFixed(0).padStart(5, ' ')} increased
+    ${nDecreased.toFixed(0).padStart(5, ' ')} decreased
+    ${(peers.length - nIncreased - nDecreased).toFixed(0).padStart(5, ' ')} unchanged
+  `
+  feeChangeSummary += feeChangeTotals
+  console.log(feeChangeTotals)
+
+  // make it available for review
+  fs.writeFileSync(`${LOG_FILES}/${getDay()}_feeChanges.txt`, feeChangeSummary)
+  fs.writeFileSync('_feeChanges.txt', feeChangeSummary)
+}
+
+// NOT USED logic for updating fees (v2)
+// eslint-disable-next-line no-unused-vars
+/*
+const updateFees2 = async () => {
   if (!ADJUST_FEES) return null
 
   console.boring(`${getDate()} updateFees() v2`)
@@ -682,14 +805,14 @@ const updateFees = async () => {
     // higher fees that come out of this probably not ideal for stuck neutral channels
     if (isNetOutflowing(peer)) {
       // without rebalancing data peer fee is only clue
-      // only makes sense for remote heavy channel
+      // remote heavy channel ideal as local heavy channel might have peer set auto adjusted high fee rate
       ppmFair = isRemoteHeavy(peer) ? peer.inbound_fee_rate : ppmFair
       // rebalancing estimates/suggestions include that so ok replacement
-      if (all.bottom25 && all.n >= MIN_SAMPLE_SIZE) ppmFair = all.bottom25 + 1
+      if (all.median && all.n >= MIN_SAMPLE_SIZE) ppmFair = all.median + 1
       // actually used rates better & more important
-      if (worked.top75 && all.n >= MIN_SAMPLE_SIZE) {
+      if (worked.median && all.n >= MIN_SAMPLE_SIZE) {
         ppmFair =
-          (worked.top75 * worked.n * WORKED_WEIGHT + all.bottom25 * all.n) / (worked.n * WORKED_WEIGHT + all.n) + 1
+          (worked.median * worked.n * WORKED_WEIGHT + all.median * all.n) / (worked.n * WORKED_WEIGHT + all.n) + 1
       }
     }
 
@@ -717,14 +840,15 @@ const updateFees = async () => {
 
     const isDecreasing =
       ADJUST_FEES &&
+      !isIncreasing &&
       ppmSane !== ppmOld &&
+      // by decreasing only when no routing we don't underprice too severely
+      flowOutRecentDaysAgo > DAYS_FOR_FEE_REDUCTION &&
       // safer to just skip VERY-remote-heavy channels to avoid false measurements of 0 flow out
       !isVeryRemoteHeavy(peer) &&
       // sustainable flow fee rate lower for outflowing peers (careful with these as profit makers)
       // and decrease whenever possible for inflowing peers (obviously not stuck remote heavy)
-      ((!isIncreasing && !isNetOutflowing(peer)) || (ppmSane < ppmOld && isNetOutflowing(peer))) &&
-      // by decreasing only when no routing we don't underprice too severely
-      flowOutRecentDaysAgo > DAYS_FOR_FEE_REDUCTION
+      (!isNetOutflowing(peer) || (ppmSane < ppmOld && isNetOutflowing(peer)))
 
     const flowString = `${isNetOutflowing(peer) ? 'outflowing' : isNetInflowing(peer) ? ' inflowing' : '   no flow'}`
     feeChangeSummary += '\n'
@@ -735,7 +859,7 @@ const updateFees = async () => {
       const ppmStep = trunc(ppmOld * (1 - NUDGE_UP) + ppmSane * NUDGE_UP) + 1
 
       // prettier-ignore
-      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d ${peer.balance.toFixed(1)}b`
+      const feeIncreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔼🔼🔼 ${flowString.padStart(15)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d ${peer.balance.toFixed(1)}b`
       feeChangeSummary += feeIncreaseLine
       console.log(feeIncreaseLine)
 
@@ -773,15 +897,17 @@ const updateFees = async () => {
     if (isDecreasing) {
       nDecreased++
 
-      const ppmSetPoint = isNetOutflowing(peer)
-        ? ppmSane // decrease to set point
-        : applyRules(subtractSafety(ppmOld)) // just gradually decrease
+      const ppmSetPoint = ppmSane
+      // if set point is far below
+      // ppmSane < applyRules(subtractSafety(ppmOld))
+      // ? ppmSane // decrease quicker to set point
+      // : applyRules(subtractSafety(ppmOld)) // decrease at slower semi constant speed
 
       // at least -1 (b/c of trunc)
       const ppmStep = trunc(ppmOld * (1 - NUDGE_DOWN) + ppmSetPoint * NUDGE_DOWN)
 
       // prettier-ignore
-      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo}d  ${peer.balance.toFixed(1)}b`
+      const feeDecreaseLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmStep.toFixed(0).padEnd(6)} ppm (-> ${(ppmSane + ')').padEnd(5)} 🔻🔻🔻 ${flowString.padStart(15)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d  ${peer.balance.toFixed(1)}b`
       feeChangeSummary += feeDecreaseLine
       console.log(feeDecreaseLine)
 
@@ -818,7 +944,7 @@ const updateFees = async () => {
 
     // for no changes
     // prettier-ignore
-    const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo}d  ${peer.balance.toFixed(1)}b`
+    const feeNoChangeLine = `${getDate()} ${peer.alias.padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> no changes (-> ${(ppmSane + ')').padEnd(5)}     ${flowString.padStart(18)} ${flowOutRecentDaysAgo.toFixed(1).padStart(5)}d  ${peer.balance.toFixed(1)}b`
     feeChangeSummary += feeNoChangeLine
     console.log(feeNoChangeLine)
 
@@ -851,6 +977,7 @@ const updateFees = async () => {
   fs.writeFileSync(`${LOG_FILES}/${getDay()}_feeChanges.txt`, feeChangeSummary)
   fs.writeFileSync('_feeChanges.txt', feeChangeSummary)
 }
+*/
 
 // keep track of peers rebalancing attempts in files
 // keep peers separate to avoid rewriting entirety of data at once on ssd
@@ -1777,7 +1904,8 @@ const isNetInflowing = p => p.routed_out_msats - p.routed_in_msats < 0
 // const isVeryLocalHeavy = p =>
 //   1.0 - p.balance < BALANCE_DEV || p.outbound_liquidity < MIN_SATS_PER_SIDE
 
-const isVeryRemoteHeavy = p => p.inbound_liquidity < MIN_SATS_PER_SIDE
+// remote heavy = very few sats on local side, the less the remote-heavier
+const isVeryRemoteHeavy = p => p.outbound_liquidity < MIN_SATS_PER_SIDE
 
 // const isBalanced = p =>
 
