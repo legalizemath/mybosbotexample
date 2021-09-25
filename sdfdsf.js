@@ -8,7 +8,7 @@ import bos from './bos.js' // wrapper for bos
 const { min, max, trunc, floor, abs, random, sqrt } = Math
 
 // time to sleep between trying a bot step again
-const MINUTES_BETWEEN_STEPS = 2
+const MINUTES_BETWEEN_STEPS = 1
 
 // minimum sats away from 0.5 balance to consider off-balance
 const MIN_SATS_OFF_BALANCE = 420e3
@@ -33,10 +33,11 @@ const MIN_CHAN_SIZE = 5 * (MIN_REBALANCE_SATS + MIN_SATS_OFF_BALANCE)
 const SAFETY_MARGIN = 2 // 1.15
 // minimum flat safety ppm margin & min for remote heavy channels
 const SAFETY_MARGIN_FLAT = 222
+// rebalancing fee rates below this aren't considered for rebalancing
+const MIN_FEE_RATE_FOR_REBALANCE = 0
+
 // minimum ppm ever possible
 const MIN_PPM_ABSOLUTE = 0
-// rebalancing fee rates below this aren't considered for rebalancing
-const MIN_FEE_RATE_FOR_REBALANCE = 1
 // any ppm above this is not considered for fees, rebalancing, or suggestions
 const MAX_PPM_ABSOLUTE = 2992
 
@@ -51,9 +52,9 @@ const MIN_SATS_PER_SIDE = 1000e3
 // const BALANCE_DEV = 0.1
 
 // max size of fee adjustment to target ppm (upward)
-const NUDGE_UP = 0.0042
+const NUDGE_UP = 0.0069
 // max size of fee adjustment to target ppm (downward)
-const NUDGE_DOWN = 0.0042
+const NUDGE_DOWN = 0.0069
 
 // max days since last successful routing out to allow increasing fee
 const DAYS_FOR_FEE_INCREASE = 1.2
@@ -106,7 +107,7 @@ const WEIGHT_OPTIONS = {
   FLOW_MARGIN_SQRT: peer => trunc(sqrt(abs(peer.flowMarginWeight))),
   FLAT: () => 1
 }
-const WEIGHT = WEIGHT_OPTIONS.FLOW_MARGIN_SQRT
+const WEIGHT = WEIGHT_OPTIONS.UNBALANCED_SATS_SQRT
 
 // experimental - fake small flowrate to be ready to expect
 const MIN_FLOWRATE_PER_DAY = 10000 // sats/day
@@ -296,6 +297,20 @@ const runBotUpdatePeers = async oldPeers => {
   }
 }
 
+// how many sats I need for balance vs how much I'll probably get in _ days
+// + check info is reliable via more than 1 recent sample or 1 very recent sample
+// + check this isn't an emergency shortage situation
+const acceptableFlowToLocal = p =>
+  -p.unbalancedSatsSigned < (p.routed_in_msats / DAYS_FOR_STATS / 1000) * DAYS_FOR_FEE_REDUCTION &&
+  daysAgo(p.routed_in_last_at) < DAYS_FOR_STATS / 2 &&
+  !isVeryRemoteHeavy(p) &&
+  !isNetOutflowing(p)
+const acceptableFlowToRemote = p =>
+  p.unbalancedSatsSigned < (p.routed_out_msats / DAYS_FOR_STATS / 1000) * DAYS_FOR_FEE_REDUCTION &&
+  daysAgo(p.routed_out_last_at) < DAYS_FOR_STATS / 2 &&
+  !isVeryLocalHeavy(p) &&
+  !isNetInflowing(p)
+
 // allow these channels to be used as a remote heavy channel in a rebalance
 const includeForRemoteHeavyRebalance = p =>
   // balance on remote side beyond min-off-balance or enough for max rebalance size
@@ -310,7 +325,9 @@ const includeForRemoteHeavyRebalance = p =>
   subtractSafety(p.my_fee_rate) > MIN_FEE_RATE_FOR_REBALANCE &&
   // rebalance fee (max) should be larger than incoming fee rate
   // or it's literally impossible since last hop costs more ppm already
-  subtractSafety(p.my_fee_rate) > p.inbound_fee_rate
+  subtractSafety(p.my_fee_rate) > p.inbound_fee_rate &&
+  // insufficient existing flow to remote side recently
+  !acceptableFlowToLocal(p)
 
 // allow these channels to be used as a local heavy channel in a rebalance
 const includeForLocalHeavyRebalance = p =>
@@ -319,7 +336,9 @@ const includeForLocalHeavyRebalance = p =>
   p.totalSats >= MIN_CHAN_SIZE &&
   p.unbalancedSats > MIN_REBALANCE_SATS &&
   // only if no settings about it or if no setting for no local-heavy rebalance true
-  !getRuleFromSettings({ alias: p.alias })?.no_local_rebalance
+  !getRuleFromSettings({ alias: p.alias })?.no_local_rebalance &&
+  // insufficient existing flow to local side recently
+  !acceptableFlowToRemote(p)
 
 // pick random remote heavy and random local heavy channel using weight setting
 const runBotPickRandomPeers = async () => {
@@ -1663,15 +1682,28 @@ const generateSnapshots = async () => {
   //   `${SNAPSHOTS_PATH}/forwardsByIns.json`,
   //   JSON.stringify(peerForwardsByIns, fixJSON, 2)
   // )
-  // fs.writeFileSync(
-  //   `${SNAPSHOTS_PATH}/forwardsByOuts.json`,
-  //   JSON.stringify(peerForwardsByOuts, fixJSON, 2)
-  // )
+  fs.writeFileSync(`${SNAPSHOTS_PATH}/forwardsByOuts.json`, JSON.stringify(peerForwardsByOuts, fixJSON, 2))
   // rebalance list array
   // fs.writeFileSync(
   //   `${SNAPSHOTS_PATH}/rebalances.json`,
   //   JSON.stringify(rebalances, fixJSON, 2)
   // )
+
+  const message = `${DAYS_FOR_STATS} days:
+
+earned: ${pretty(totalEarnedFromForwards)}
+spent: ${pretty(totalFeesPaid + totalChainFees)}
+net: ${pretty(totalProfit)}
+routed: ${
+    median(
+      forwardsAll.map(f => f.fee_mtokens / 1000.0),
+      { f: pretty, pr: 1 }
+    ).s
+  }
+`
+  const { token, chat_id } = mynode.settings?.telegram || {}
+  if (token && chat_id) bos.sayWithTelegramBot({ token, chat_id, message })
+
   return peers
 }
 
@@ -1722,7 +1754,7 @@ const calculateFlowRateMargin = p => {
   // then the negative signal to rebalance_out will only show up at B > 0.67
   // and positive signal to rebalance_in will only show up at B < 0.5
   // this will allow the channel to become more reliable in direction the flow happens
-  // and take advantage of "free rebalancing" from routing beyond 0.5 in less unsed
+  // and take advantage of "free rebalancing" from routing beyond 0.5 in less used
   // direction w/o paying to correct it back to 0.5
 
   // MIN_F = 0 for accurate stat, added to set minimum flow rate to correct for
@@ -1769,9 +1801,7 @@ const runBotConnectionCheck = async ({ quiet = false } = {}) => {
   // update user about offline peers just in case
   console.log(`${getDate()} ${message}`)
   const { token, chat_id } = mynode.settings?.telegram || {}
-  if (!quiet && token && chat_id) {
-    bos.sayWithTelegramBot({ token, chat_id, message })
-  }
+  if (!quiet && token && chat_id) bos.sayWithTelegramBot({ token, chat_id, message })
 
   // skip if set to not reset tor or unused
   if (!ALLOW_TOR_RESET) return 0
@@ -1824,10 +1854,12 @@ const initialize = async () => {
 
   const feeUpdatesPerDay = floor((60 * 24) / MINUTES_BETWEEN_FEE_CHANGES)
 
-  const updateNudge = (now, nudge, target) => now * (1 - nudge) + target * nudge
+  // const updateNudge = (now, nudge, target) => now * (1 - nudge) + target * nudge
+  // const maxUpFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(f => updateNudge(f, NUDGE_UP, 100), 0)
+  // const maxDownFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(f => updateNudge(f, NUDGE_DOWN, 100), 0)
 
-  const maxUpFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(f => updateNudge(f, NUDGE_UP, 100), 0)
-  const maxDownFeeChangePerDay = [...Array(feeUpdatesPerDay)].reduce(f => updateNudge(f, NUDGE_DOWN, 100), 0)
+  const maxUpFeeChangePerDay = ((1 + NUDGE_UP) ** feeUpdatesPerDay - 1) * 100
+  const maxDownFeeChangePerDay = (1 - NUDGE_DOWN) ** feeUpdatesPerDay * 100
 
   console.log(`${getDate()}
   ========================================================
@@ -1901,13 +1933,12 @@ const isNetOutflowing = p => p.routed_out_msats - p.routed_in_msats > 0
 
 const isNetInflowing = p => p.routed_out_msats - p.routed_in_msats < 0
 
-// const isVeryLocalHeavy = p =>
-//   1.0 - p.balance < BALANCE_DEV || p.outbound_liquidity < MIN_SATS_PER_SIDE
-
-// remote heavy = very few sats on local side, the less the remote-heavier
+// very remote heavy = very few sats on local side, the less the remote-heavier
 const isVeryRemoteHeavy = p => p.outbound_liquidity < MIN_SATS_PER_SIDE
+// very local heavy = very few sats on remote side, the less the local-heavier
+const isVeryLocalHeavy = p => p.inbound_liquidity < MIN_SATS_PER_SIDE
 
-// const isBalanced = p =>
+const daysAgo = ts => (Date.now() - ts) / (1000 * 60 * 60 * 24)
 
 const pretty = n => String(trunc(n || 0)).replace(/\B(?=(\d{3})+\b)/g, '_')
 
@@ -1941,7 +1972,7 @@ const stylingPatterns =
   /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
 
 // returns mean, truncated fractions
-const median = (numbers = [], { f = v => v } = {}) => {
+const median = (numbers = [], { f = v => v, pr = 0 } = {}) => {
   const sorted = numbers
     .slice()
     .filter(v => !isNaN(v))
@@ -1955,19 +1986,17 @@ const median = (numbers = [], { f = v => v } = {}) => {
   const middleTop = floor(sorted.length * 0.75)
   const middleBottom = floor(sorted.length * 0.25)
 
+  const tr = fl => +fl.toFixed(pr)
+
   const result = {
     n,
-    avg: f(trunc(sorted.reduce((sum, val) => sum + val, 0) / sorted.length)),
+    avg: f(tr(sorted.reduce((sum, val) => sum + val, 0) / sorted.length)),
     bottom: f(sorted[0]),
     bottom25: f(
-      sorted.length % 4 === 0
-        ? trunc((sorted[middleBottom - 1] + sorted[middleBottom]) / 2.0)
-        : trunc(sorted[middleBottom])
+      sorted.length % 4 === 0 ? tr((sorted[middleBottom - 1] + sorted[middleBottom]) / 2.0) : tr(sorted[middleBottom])
     ),
-    median: f(sorted.length % 2 === 0 ? trunc((sorted[middle - 1] + sorted[middle]) / 2.0) : trunc(sorted[middle])),
-    top75: f(
-      sorted.length % 4 === 0 ? trunc((sorted[middleTop - 1] + sorted[middleTop]) / 2.0) : trunc(sorted[middleTop])
-    ),
+    median: f(sorted.length % 2 === 0 ? tr((sorted[middle - 1] + sorted[middle]) / 2.0) : tr(sorted[middle])),
+    top75: f(sorted.length % 4 === 0 ? tr((sorted[middleTop - 1] + sorted[middleTop]) / 2.0) : tr(sorted[middleTop])),
     top: f(sorted[numbers.length - 1])
   }
 
