@@ -4,7 +4,7 @@ just meant as an example of how wrapping of bos (balanceofsatoshis) can be done 
 
 this does everything through bos by wrapping the js functions bos uses to act on terminal commands, bos wasn't made for calling these functions directly from other projects (yet) so compatibility can easily change and should be just used as an example
 
-this is not ready for anyone to use and was just for experimentation I was doing, it's nowhere close to a working project
+this is not ready for anyone to use and was just for experimentation I was doing, there's probably errors all over this thing, it's nowhere close to a working project
 
 `bos.js` is where I place bos function wrappers and then call them from messy experiments I'm testing out in `index.js`
 
@@ -26,21 +26,27 @@ Then I created package.json with `"type": "module",` for imports to work
 
 and I run it via
 
-```
+```bash
 npm link balanceofsatoshis && node index.js
 ```
 
 or same via shortcut in this package.json
 
-```
+```bash
 npm start
+```
+
+random scripts like `lookup.js` can be ran (after npm link balanceofsatoshis at least once) via
+
+```bash
+node lookup
 ```
 
 it will link global installation that already exists to the project so it's possible to use it w/o installing new one in node_modules & setting up auth again
 
 there's 0 package dependencies except for this link
 
-I stop it with ctrl-c
+I stop it with ctrl+c
 
 #Bitcoin, not 💩coin
 
