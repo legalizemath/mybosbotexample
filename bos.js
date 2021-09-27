@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
-  linked via `npm link balanceofsatoshis`
-  Used with npm i -g balanceofsatoshis@10.18.1
+  Installed with `npm i -g balanceofsatoshis@10.18.1`
+  Linked via `npm link balanceofsatoshis`
 */
 
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
@@ -143,7 +143,7 @@ const reconnect = async (log = false) => {
 const rebalance = async (
   { fromChannel, toChannel, maxSats = 200000, maxMinutes = 2, maxFeeRate = 100 },
   choices = {},
-  log = false
+  log = { details: false, progress: true }
 ) => {
   try {
     // change to internal key names, add overwrites in choices
@@ -160,7 +160,7 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    log && console.boring(`${getDate()} bos.rebalance()`, log ? JSON.stringify(options) : '')
+    log?.details && console.boring(`${getDate()} bos.rebalance()`, log?.details ? JSON.stringify(options) : '')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(), // required
@@ -168,14 +168,17 @@ const rebalance = async (
       out_channels: [], // seems necessary
       ...options
     })
-    log && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
-    console.log('')
+    log?.details && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
+    log?.progress && console.log('')
+    const finalFeeRate = +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1]
+    const finalAmount = Math.trunc(+res.rebalance[2]?.rebalanced * 1e8)
     return {
-      fee_rate: +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1],
-      rebalanced: Math.trunc(+res.rebalance[2]?.rebalanced * 1e8)
+      fee_rate: finalFeeRate,
+      rebalanced: finalAmount,
+      msg: res
     }
   } catch (e) {
-    console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
+    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
     // provide suggested ppm if possible
     return {
       failed: true,
@@ -282,6 +285,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // bos call getFeeRates - has base fee info (via channel or tx ids, not pubkeys)
 // bos call getForwards - forwarding events, choices: either {limit: 5} or {token: `{"offset":10,"limit":5}`}
 // names for methods and choices for arguments via `bos call` or here
+// https://github.com/alexbosworth/ln-service
 // https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
 const callAPI = async (method, choices = {}, log = false) => {
   try {
@@ -662,8 +666,9 @@ const removeStyling = o =>
   )
 
 const logger = log => ({
-  info: v => (log ? console.log(getDate(), removeStyling(v)) : process.stdout.write('.')),
-  error: v => (log ? console.error(getDate(), v) : process.stdout.write('!'))
+  info: v =>
+    log?.details ? console.log(getDate(), removeStyling(v)) : log?.progress ? process.stdout.write('.') : null,
+  error: v => (log?.details ? console.error(getDate(), v) : log?.progress ? process.stdout.write('!') : null)
 })
 
 console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
