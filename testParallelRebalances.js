@@ -122,14 +122,6 @@ const bot = async () => {
   )
 }
 
-// const result = await bos.rebalance({
-//   fromChannel: localHeavy.public_key,
-//   toChannel: remoteHeavy.public_key,
-//   maxSats: maxSatsToRebalance,
-//   maxMinutes: MAX_REBALANCE_MINUTES,
-//   maxFeeRate: MAX_REBALANCE_FEE_RATE
-// })
-
 // various useful functions:
 
 // waste time for set number of minutes
