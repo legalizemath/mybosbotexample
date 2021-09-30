@@ -4,6 +4,12 @@
   Linked via `npm link balanceofsatoshis`
 */
 
+/*
+  Wrapper for balanceofsatoshis installed globally
+  Installed with `npm i -g balanceofsatoshis@10.18.1`
+  Linked via `npm link balanceofsatoshis`
+*/
+
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
@@ -27,6 +33,8 @@ import {
   getPeers as bosGetPeers,
   getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
+
+const { trunc } = Math
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
@@ -141,20 +149,20 @@ const reconnect = async (log = false) => {
 }
 
 const rebalance = async (
-  { fromChannel, toChannel, maxSats = 200000, maxMinutes = 2, maxFeeRate = 100 },
+  { fromChannel, toChannel, maxSats = 1, maxMinutes = 3, maxFeeRate = 1, avoid = [], retryOnTimeout = false },
   choices = {},
   log = { details: false, progress: true }
 ) => {
   try {
     // change to internal key names, add overwrites in choices
     const options = {
-      out_through: fromChannel,
-      in_through: toChannel,
-      max_rebalance: String(Math.trunc(maxSats)),
-      timeout_minutes: Math.trunc(maxMinutes),
-      max_fee_rate: Math.trunc(maxFeeRate),
-      max_fee: Math.trunc(maxSats * 0.01), // unused, 10k ppm
-      avoid: [],
+      out_through: fromChannel, // public key
+      in_through: toChannel, // public key
+      max_rebalance: String(trunc(maxSats)), // sats
+      timeout_minutes: trunc(maxMinutes), // minutes
+      max_fee_rate: trunc(maxFeeRate), // max fee rate
+      max_fee: trunc(((maxSats * maxFeeRate) / 1e6) * 10), // unused & to avoid set at 10x max fee rate // trunc(maxSats * 0.01)
+      avoid,
       // out_channels: [],
       // in_outound: undefined,
       // out_inbound: undefined,
@@ -168,20 +176,32 @@ const rebalance = async (
       out_channels: [], // seems necessary
       ...options
     })
-    log?.details && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
     log?.progress && console.log('')
+    log?.details && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
     const finalFeeRate = +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1]
-    const finalAmount = Math.trunc(+res.rebalance[2]?.rebalanced * 1e8)
+    const finalAmount = trunc(+res.rebalance[2]?.rebalanced * 1e8)
     return {
       fee_rate: finalFeeRate,
       rebalanced: finalAmount,
       msg: res
     }
+    // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
   } catch (e) {
+    log?.progress && console.log('')
     log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
+
+    // if we're retrying on timeouts & avoid wasn't used, rerun again just once with avoid of low fees
+    if (retryOnTimeout && e[1] === 'ProbeTimeout' && avoid.length === 0) {
+      log?.details && console.error(`\n${getDate()} retrying just once after ProbeTimeout error`)
+      // will avoid fees below 1/3 of requested fee rate for final hop
+      avoid.push(`FEE_RATE<${trunc(maxFeeRate / 3)}/${toChannel}`)
+      return await rebalance({ fromChannel, toChannel, maxSats, maxMinutes, maxFeeRate, avoid }, choices, log)
+    }
+
     // provide suggested ppm if possible
     return {
       failed: true,
+      // rebalanced: maxSats,
       ppmSuggested: e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
       msg: e
     }
@@ -196,23 +216,24 @@ const send = async (
     sats = 1,
     maxMinutes = 1,
     maxFeeRate = 100,
-    message = undefined // string to send
+    message = undefined, // string to send,
+    retryOnTimeout = false
   },
-  log = false,
+  log = { details: false, progress: true },
   retry = false
 ) => {
   const options = {
     destination,
     out_through: fromChannel,
     in_through: toChannel,
-    amount: String(Math.trunc(sats)),
-    timeout_minutes: Math.trunc(maxMinutes),
+    amount: String(trunc(sats)),
+    timeout_minutes: trunc(maxMinutes),
     // uses max fee (sats) only so calculated from max fee rate (ppm)
-    max_fee: Math.trunc(sats * maxFeeRate * 1e-6 + 1),
+    max_fee: trunc(sats * maxFeeRate * 1e-6 + 1),
     message
   }
   try {
-    log && console.boring(`${getDate()} bos.send() to ${destination}`, log ? JSON.stringify(options) : '')
+    log?.details && console.boring(`${getDate()} bos.send() to ${destination}`, log ? JSON.stringify(options) : '')
     const res = await bosPushPayment({
       lnd: await mylnd(),
       logger: logger(log),
@@ -223,19 +244,21 @@ const send = async (
       request,
       ...options
     })
-    log && console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
-    console.log('')
+    log?.progress && console.log('')
+    log?.details && console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
     return {
-      fee_rate: Math.trunc(((1.0 * +res.fee) / +res.paid) * 1e6),
-      sent: Math.trunc(+res.paid), // total sent including fee
-      rebalanced: Math.trunc(+res.paid - +res.fee) // to match bos.rebalance key
+      fee_rate: trunc(((1.0 * +res.fee) / +res.paid) * 1e6),
+      sent: trunc(+res.paid), // total sent including fee
+      paidTarget: trunc(+res.paid - +res.fee), // sent excluding fee
+      msg: res
     }
   } catch (e) {
-    console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
+    log?.progress && console.log('')
+    log?.details && console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
 
-    // if higher fee was JUST found try just 1 more time
+    // if someone JUST changed fee try again just 1 more time
     if (!retry && e[1] === 'FeeInsufficient') {
       console.error(`\n${getDate()} retrying just once after FeeInsufficient error`)
       return await send(
@@ -251,9 +274,10 @@ const send = async (
         true
       )
     }
+    const suggestedFeeRate = e[1] === 'MaxFeeLimitTooLow' ? trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0) : null
     return {
       failed: true,
-      ppmSuggested: e[1] === 'MaxFeeLimitTooLow' ? Math.trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0) : null,
+      ppmSuggested: suggestedFeeRate,
       msg: e
     }
   }
