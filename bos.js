@@ -4,12 +4,6 @@
   Linked via `npm link balanceofsatoshis`
 */
 
-/*
-  Wrapper for balanceofsatoshis installed globally
-  Installed with `npm i -g balanceofsatoshis@10.18.1`
-  Linked via `npm link balanceofsatoshis`
-*/
-
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
