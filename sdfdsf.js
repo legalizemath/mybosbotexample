@@ -251,7 +251,7 @@ const runBotRebalaceOrganizer = async () => {
   // to keep track of list of launched rebalancing tasks
   const rebalanceTasks = []
   const STAGGERED_LAUNCH_MS = 1111 // ms to put between each launch for safety
-  const RETRY_ON_TIMEOUTS = true // experimental
+  const RETRIES_ON_TIMEOUTS = 2 // experimental
   // function to launch every rebalance task for a matched pair with
   const handleRebalance = async matchedPair => {
     const { localHeavy, remoteHeavy, maxSatsToRebalance, maxRebalanceFee, run, startedAt } = matchedPair
@@ -270,7 +270,7 @@ const runBotRebalaceOrganizer = async () => {
         maxSats: maxSatsToRebalanceAfterRules,
         maxMinutes: MINUTES_FOR_REBALANCE,
         maxFeeRate: maxRebalanceFee,
-        retryOnTimeout: RETRY_ON_TIMEOUTS
+        retryAvoidsOnTimeout: RETRIES_ON_TIMEOUTS
       },
       undefined,
       {} // show nothing, too many things happening
@@ -425,8 +425,8 @@ const findGoodPeerMatch = ({ remoteChannel, peerOptions }) => {
   //   console.log(`${cpk} ${median(uniquePeers[cpk].map(r => r.ppm)).o.median} n:${uniquePeers[cpk].length}`)
   // })
 
-  // * 3 will help return undefined
-  const winningCandidatePublicKey = localCandidates[trunc(random() * random() * localCandidates.length * 3)]
+  // * 4 will help return undefined about half the time so -1 so still some random peer searching
+  const winningCandidatePublicKey = localCandidates[trunc(random() * random() * localCandidates.length * 4)]
   const winningOptionIndex = peerOptions.findIndex(p => p.public_key === winningCandidatePublicKey)
 
   // pick random peer, ones added at lower ppm or multiple times have more chance
@@ -775,6 +775,9 @@ const runBotRebalancePeers = async ({ localChannel, remoteChannel }, isFirstRun 
         maxFeeRate
       })
 
+  // keysend amount target received is amount rebalanced
+  if (resBalance.paidTarget) resBalance.rebalanced = resBalance.paidTarget
+
   // display successful rebalance cost
   if (!resBalance.failed) {
     console.log(
@@ -1033,7 +1036,7 @@ const updateFees = async () => {
     }
 
     // update record if last recorded fee rate isn't what is last in last records
-    if ((logFileData?.feeChanges || [])[0] !== ppmOld) {
+    if ((logFileData?.feeChanges || [])[0]?.ppm !== ppmOld) {
       appendRecord({
         peer,
         newRecordData: {
@@ -1266,6 +1269,7 @@ const generateSnapshots = async () => {
   VERBOSE && console.boring(`${getDate()} ${getPaymentEvents.length} payment records found in db`)
   for (const fileName of paymentLogFiles) {
     const timestamp = fileName.split('_')[0]
+    console.boring(`${fileName} - is Recent? ${isRecent(timestamp)}`)
     if (!isRecent(timestamp)) continue // log file older than oldest needed record
     const payments = JSON.parse(fs.readFileSync(`${LOG_FILES}/${fileName}`))
     getPaymentEvents.push(...payments.filter(p => isRecent(p.created_at_ms)))
@@ -1839,10 +1843,10 @@ const runBotConnectionCheck = async ({ quiet = false } = {}) => {
   const requestTime = Date.now()
   fs.writeFileSync(RESET_REQUEST_PATH, JSON.stringify({ id: requestTime }))
 
-  // give it a lot of time
-  await sleep(10 * 60 * 1000)
+  // give it a LOT of time (could be lots of things updating)
+  await sleep(20 * 60 * 1000)
 
-  if (!fs.existsSync(RESET_REQUEST_PATH)) {
+  if (fs.existsSync(RESET_REQUEST_PATH)) {
     console.log(`${getDate()} tor reset failed, request file still there. resetHandler not running?`)
     process.exit(1)
   }
