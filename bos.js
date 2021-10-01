@@ -143,7 +143,7 @@ const reconnect = async (log = false) => {
 }
 
 const rebalance = async (
-  { fromChannel, toChannel, maxSats = 1, maxMinutes = 3, maxFeeRate = 1, avoid = [], retryOnTimeout = false },
+  { fromChannel, toChannel, maxSats = 1, maxMinutes = 3, maxFeeRate = 1, avoid = [], retryAvoidsOnTimeout = 0 },
   choices = {},
   log = { details: false, progress: true }
 ) => {
@@ -184,12 +184,29 @@ const rebalance = async (
     log?.progress && console.log('')
     log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
 
-    // if we're retrying on timeouts & avoid wasn't used, rerun again just once with avoid of low fees
-    if (retryOnTimeout && e[1] === 'ProbeTimeout' && avoid.length === 0) {
-      log?.details && console.error(`\n${getDate()} retrying just once after ProbeTimeout error`)
-      // will avoid fees below 1/3 of requested fee rate for final hop
-      avoid.push(`FEE_RATE<${trunc(maxFeeRate / 3)}/${toChannel}`)
-      return await rebalance({ fromChannel, toChannel, maxSats, maxMinutes, maxFeeRate, avoid }, choices, log)
+    // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
+    if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout' && avoid.length <= 1) {
+      retryAvoidsOnTimeout--
+      const oldAvoidPpm = +(avoid[0] || '').match(/FEE_RATE<(.+?)\//)?.[1] || 0
+      // each new retry moves avoid fee rate 25% closer to half max total fee rate
+      const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
+      const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
+
+      // log?.details &&
+      console.boring(
+        `${getDate()} Retrying after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
+          ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
+      )
+
+      // for simplicity will always overwrite or create first item in avoid array
+      if ((avoid[0] || '').includes('FEE_RATE<')) avoid[0] = newAvoid
+      else avoid.unshift(newAvoid)
+
+      return await rebalance(
+        { fromChannel, toChannel, maxSats, maxMinutes, maxFeeRate, avoid, retryAvoidsOnTimeout },
+        choices,
+        log
+      )
     }
 
     // provide suggested ppm if possible
