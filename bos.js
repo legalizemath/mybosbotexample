@@ -751,7 +751,7 @@ const setPeerPolicy = async (
       if (!channel || !channel.local || !channel.remote || !channel.transaction_id) {
         return 1
       }
-      const byId = by_channel_id[channel.id]
+      const byId = by_channel_id?.[channel.id]
       const settings = {
         // channel to change:
         transaction_id: channel.transaction_id,
@@ -760,8 +760,8 @@ const setPeerPolicy = async (
         base_fee_mtokens: String(byId?.base_fee_mtokens || base_fee_mtokens || channel.local.base_fee_mtokens),
         fee_rate: +byId?.fee_rate || +fee_rate || channel.local.fee_rate,
         cltv_delta: +byId?.cltv_delta || +cltv_delta || channel.local.cltv_delta,
-        min_htlc_mtokens: String(+byId?.min_htlc_mtokens || min_htlc_mtokens || channel.local.min_htlc_mtokens),
-        max_htlc_mtokens: String(+byId?.max_htlc_mtokens || max_htlc_mtokens || channel.local.max_htlc_mtokens)
+        min_htlc_mtokens: String(byId?.min_htlc_mtokens || min_htlc_mtokens || channel.local.min_htlc_mtokens),
+        max_htlc_mtokens: String(byId?.max_htlc_mtokens || max_htlc_mtokens || channel.local.max_htlc_mtokens)
       }
       log && console.log({ settings })
       await bos.callAPI('updateRoutingFees', settings)
