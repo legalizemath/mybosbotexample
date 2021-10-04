@@ -1,5 +1,6 @@
 /*
   Wrapper for balanceofsatoshis installed globally
+  Needs node v14+, node -v
   Installed with `npm i -g balanceofsatoshis@10.18.1`
   Linked via `npm link balanceofsatoshis`
 */
@@ -28,7 +29,7 @@ import {
   getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
 
-const { trunc } = Math
+const { trunc, min } = Math
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
@@ -736,6 +737,7 @@ const setPeerPolicy = async (
   log = false
 ) => {
   if (!peer_key) return 1
+  let settings
   try {
     // get my public key
     const me = (await callAPI('getIdentity')).public_key
@@ -744,7 +746,7 @@ const setPeerPolicy = async (
     // get channels for my node with this peer
     const channels = await getNodeChannels({ public_key: me, peer_key })
     if (!channels) return 1
-    log && console.log(`${getDate()} channels: ${JSON.stringify(channels, fixJSON, 2)}`)
+    // log && console.log(`${getDate()} channels before changes: ${JSON.stringify(channels, fixJSON, 2)}`)
 
     // set settings for each channel with that peer & use ones provided to replace
     for (const channel of Object.values(channels)) {
@@ -752,24 +754,32 @@ const setPeerPolicy = async (
         return 1
       }
       const byId = by_channel_id?.[channel.id]
-      const settings = {
+      // updates seems to fail sometimes for max htlc above wumbo size ~16M completely so lets cap it there
+      // also just in case cap below capacity with subtracted 1% reserve, whichever is smaller
+      const capacity_msats = trunc(0.99 * channel.capacity * 1000)
+      const wumbo_msats = 16777216 * 1000 // 2^24 * 1000
+      let max_htlc_msats = +(byId?.max_htlc_mtokens ?? max_htlc_mtokens ?? channel.local.max_htlc_mtokens)
+      max_htlc_msats = min(max_htlc_msats, capacity_msats, wumbo_msats)
+
+      settings = {
         // channel to change:
         transaction_id: channel.transaction_id,
         transaction_vout: +channel.transaction_vout,
-        // now settings:
-        base_fee_mtokens: String(byId?.base_fee_mtokens || base_fee_mtokens || channel.local.base_fee_mtokens),
-        fee_rate: +byId?.fee_rate || +fee_rate || channel.local.fee_rate,
-        cltv_delta: +byId?.cltv_delta || +cltv_delta || channel.local.cltv_delta,
-        min_htlc_mtokens: String(byId?.min_htlc_mtokens || min_htlc_mtokens || channel.local.min_htlc_mtokens),
-        max_htlc_mtokens: String(byId?.max_htlc_mtokens || max_htlc_mtokens || channel.local.max_htlc_mtokens)
+        // apply by descending priority: by-channel setting, overall setting, and then previous unchanged setting
+        base_fee_mtokens: String(byId?.base_fee_mtokens ?? base_fee_mtokens ?? channel.local.base_fee_mtokens),
+        fee_rate: +(byId?.fee_rate ?? fee_rate ?? channel.local.fee_rate),
+        cltv_delta: +(byId?.cltv_delta ?? cltv_delta ?? channel.local.cltv_delta),
+        min_htlc_mtokens: String(byId?.min_htlc_mtokens ?? min_htlc_mtokens ?? channel.local.min_htlc_mtokens),
+        max_htlc_mtokens: String(max_htlc_msats)
       }
-      log && console.log({ settings })
-      await bos.callAPI('updateRoutingFees', settings)
+      log && console.log('bos call updateRoutingFees', settings)
+      const result = await bos.callAPI('updateRoutingFees', settings)
+      log && console.log({ result })
     }
 
     return 0
   } catch (e) {
-    console.error(JSON.stringify(e))
+    console.error('error:', JSON.stringify(e), 'with settings:', settings)
     return 1
   }
 }
