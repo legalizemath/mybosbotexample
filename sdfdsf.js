@@ -32,7 +32,7 @@ const MAX_REBALANCE_SATS_KEYSEND = 212121
 
 // suspect might cause tor issues if too much bandwidth being used
 // setting to 1 makes it try just 1 rebalance at a time
-const MAX_PARALLEL_REBALANCES = 11
+const MAX_PARALLEL_REBALANCES = 7
 
 // channels smaller than this not necessary to balance or adjust fees for
 // usually special cases anyway
@@ -711,11 +711,35 @@ const runUpdateFeesCheck = async () => {
 
 // logic for updating fees (v3)
 const updateFees = async () => {
+  if (!ADJUST_FEES) return null
   console.boring(`${getDate()} updateFees() v3`)
 
   // generate brand new snapshots
   const allPeers = await generateSnapshots()
-  // adjust fees for these channels
+
+  // just set max htlcs for small channels first
+  // those likely still count for failures
+  const smallPeers = allPeers.filter(
+    p =>
+      !p.is_offline &&
+      !p.is_pending &&
+      !p.is_private &&
+      p.is_active &&
+      // just small channels
+      p.totalSats <= MIN_CHAN_SIZE
+  )
+  for (const peer of smallPeers) {
+    console.boring(
+      `${getDate()} "${peer.alias}" small channels < ${pretty(MIN_CHAN_SIZE)} ` +
+        'sats capacity limit (skipping fee adjustments)'
+    )
+    await bos.setPeerPolicy({
+      peer_key: peer.public_key,
+      by_channel_id: sizeMaxHTLC(peer)
+    })
+  }
+
+  // adjust fees & max htlcs for normal channels
   const peers = allPeers.filter(
     p =>
       !p.is_offline &&
@@ -775,10 +799,9 @@ const updateFees = async () => {
       return trunc(ppmIn)
     }
 
-    let isIncreasing = ADJUST_FEES && flowOutRecentDaysAgo < DAYS_FOR_FEE_INCREASE
+    let isIncreasing = flowOutRecentDaysAgo < DAYS_FOR_FEE_INCREASE
 
     let isDecreasing =
-      ADJUST_FEES &&
       !isIncreasing &&
       flowOutRecentDaysAgo > DAYS_FOR_FEE_REDUCTION &&
       // safer to just skip VERY-remote-heavy channels to avoid false measurements of 0 flow out
@@ -805,17 +828,6 @@ const updateFees = async () => {
     // get the rest of channel policies figured out
     const localSats = ((peer.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(5)
     const remoteSats = ((peer.inbound_liquidity / 1e6).toFixed(1) + 'M').padEnd(5)
-    const by_channel_id = peer.ids.reduce((final, channel) => {
-      const { local_balance } = channel
-      // shouldn't happen
-      if (local_balance === undefined) return final // process.exit(1)
-
-      // round down to nearest 2^X for max htlc to minimize failures and hide exact balances
-      const safeHTLC = max(1, floor2(local_balance)) * 1000
-      final[channel.id] = { max_htlc_mtokens: safeHTLC }
-
-      return final
-    }, {})
 
     if (isIncreasing) {
       nIncreased++
@@ -847,7 +859,7 @@ const updateFees = async () => {
     // do it
     const errorCodeOnChangeAttempt = await bos.setPeerPolicy({
       peer_key: peer.public_key,
-      by_channel_id, // max htlc sizes
+      by_channel_id: sizeMaxHTLC(peer), // max htlc sizes
       fee_rate: ppmNew // fee rate
     })
 
@@ -1478,7 +1490,7 @@ const generateSnapshots = async () => {
     const lastRoutedOutString =
       lastRoutedOut > DAYS_FOR_STATS
         ? `routed-out (-->) ${DAYS_FOR_STATS}+ days ago`
-        : `routed-out (-->) ${lastRoutedOut} days ago`
+        : `routed-out (-->) ${lastRoutedOut.toFixed(1)} days ago`
 
     const issues = []
 
@@ -1598,40 +1610,6 @@ const addDetailsFromSnapshot = peers => {
     // calculateFlowRateMargin(p)
   }
 }
-/*
-// experimental
-const calculateFlowRateMargin = p => {
-  const B = p.balance
-  const fOut = p.routed_out_msats / 1000
-  const fIn = p.routed_in_msats / 1000
-  const MIN_F = MIN_FLOWRATE_PER_DAY
-
-  p.flowMargin = trunc((fOut / DAYS_FOR_STATS + MIN_F) * (1 - B) - (fIn / DAYS_FOR_STATS + MIN_F) * B)
-  p.flowMarginWithRules = isLocalHeavy(p) // B >> 0.5 local
-    ? min(p.flowMargin, -1) // maybe R_out
-    : isRemoteHeavy(p) // B << 0.5 remote
-    ? max(p.flowMargin, 1) // maybe R_in
-    : 0
-
-  // adding this metric that counts days to spend each remaining liquidity
-  // negative suggests flow in needs more inbound liquidity for reliability (R_out)
-  // positive suggests flow out needs more local balance for reliability (R_in)
-  // e.g. huge flow out on balanced channel turns metric positive
-  // e.g. huge flow in on balanced channel turns metric negative
-  // metric is neutral when fOut/fIn = local_sats/remote_sats
-  // fOut/fIn = 2 would correspond to ideally 2x more local sats than remote sats or B~0.67
-  // with positive signal for 0.5 balance channel suggesting rebalance_in
-  // a neutral region can be made by ignoring positive signal when B >= 0.5
-  // and ignoring negative metrics when B <= 0.5
-  // then the negative signal to rebalance_out will only show up at B > 0.67
-  // and positive signal to rebalance_in will only show up at B < 0.5
-  // this will allow the channel to become more reliable in direction the flow happens
-  // and take advantage of "free rebalancing" from routing beyond 0.5 in less used
-  // direction w/o paying to correct it back to 0.5
-
-  // MIN_F = 0 for accurate stat, added to set minimum flow rate to correct for
-}
-*/
 
 // 1. check internet connection, when ok move on
 // 2. do bos reconnect
@@ -1823,6 +1801,26 @@ const isNotEmpty = obj => !isEmpty(obj)
 
 console.boring = (...args) => console.log(`${dim}${args}${undim}`)
 
+// rounds down to nearest power of 10
+// const floor10 = v => pow(10, floor(log10(v)))
+// rounds down to nearest power of 2
+const floor2 = v => pow(2, floor(log2(v)))
+
+const sizeMaxHTLC = peer =>
+  peer.ids?.reduce((final, channel) => {
+    const { local_balance } = channel
+    // shouldn't happen
+    if (local_balance === undefined) return final
+
+    // round down to nearest 2^X for max htlc to minimize failures and hide exact balances
+    const safeHTLC = max(1, floor2(local_balance)) * 1000
+    final[channel.id] = { max_htlc_mtokens: safeHTLC }
+
+    console.boring(`  ${channel.id} max htlc safe size to be set to ${pretty(safeHTLC / 1000)} sats`)
+
+    return final
+  }, {})
+
 // if quiet nothing is printed and exit request isn't checked
 const sleep = async (ms, { msg = '', quiet = false } = {}) => {
   if (quiet) return await new Promise(resolve => setTimeout(resolve, trunc(ms)))
@@ -1851,12 +1849,6 @@ const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim() // .replace(/[\u{0
 // console log colors
 const dim = '\x1b[2m'
 const undim = '\x1b[0m'
-
-// rounds down to nearest power of 10
-// const floor10 = v => pow(10, floor(log10(v)))
-
-// rounds down to nearest power of 2
-const floor2 = v => pow(2, floor(log2(v)))
 
 // returns mean, truncated fractions
 const median = (numbers = [], { f = v => v, pr = 0 } = {}) => {
