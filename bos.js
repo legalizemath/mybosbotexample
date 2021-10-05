@@ -29,7 +29,7 @@ import {
   getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
 
-const { trunc, min } = Math
+const { trunc, min, ceil } = Math
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
@@ -163,7 +163,8 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    log?.details && console.boring(`${getDate()} bos.rebalance()`, log?.details ? JSON.stringify(options) : '')
+    log?.details && console.boring(`${getDate()} bos.rebalance()`, JSON.stringify(options))
+    if (fromChannel === toChannel) throw new Error('fromChannel same as toChannel')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(), // required
@@ -174,11 +175,20 @@ const rebalance = async (
     log?.progress && console.log('')
     log?.details && console.log(`\n${getDate()} bos.rebalance() success:`, JSON.stringify(res))
     const finalFeeRate = +res.rebalance[2]?.rebalance_fee_rate.match(/\((.*)\)/)[1]
-    const finalAmount = trunc(+res.rebalance[2]?.rebalanced * 1e8)
+    // bos just shows down to sats
+    const finalAmount = trunc(+res.rebalance[2].rebalanced * 1e8)
+    const feeSpent = trunc(+res.rebalance[2].rebalance_fees_spent * 1e8)
     return {
-      fee_rate: finalFeeRate,
-      rebalanced: finalAmount,
-      msg: res
+      // failed: false,
+      fee_rate: finalFeeRate, // parts per million spent on fee
+      rebalanced: finalAmount, // total sats sent
+      msg: res, // bos response
+
+      arrived: finalAmount - feeSpent, // amount arrived at destination
+      sent: finalAmount, // total sats sent|spent from source
+      fee: feeSpent // sats paid for fee
+
+      // ppmSuggested: null
     }
     // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
   } catch (e) {
@@ -187,7 +197,7 @@ const rebalance = async (
 
     // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
     if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout' && avoid.length <= 1) {
-      retryAvoidsOnTimeout--
+      retryAvoidsOnTimeout-- // 1 less retry left now
       const oldAvoidPpm = +(avoid[0] || '').match(/FEE_RATE<(.+?)\//)?.[1] || 0
       // each new retry moves avoid fee rate 25% closer to half max total fee rate
       const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
@@ -202,7 +212,7 @@ const rebalance = async (
       // for simplicity will always overwrite or create first item in avoid array
       if ((avoid[0] || '').includes('FEE_RATE<')) avoid[0] = newAvoid
       else avoid.unshift(newAvoid)
-
+      // continue as retry
       return await rebalance(
         { fromChannel, toChannel, maxSats, maxMinutes, maxFeeRate, avoid, retryAvoidsOnTimeout },
         choices,
@@ -211,11 +221,18 @@ const rebalance = async (
     }
 
     // provide suggested ppm if possible
+    const ppmSuggested = e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null
     return {
       failed: true,
-      // rebalanced: maxSats,
-      ppmSuggested: e[1] === 'RebalanceFeeRateTooHigh' ? +e[2].needed_max_fee_rate : null,
-      msg: e
+      // fee_rate: null,
+      // rebalanced: null,
+      msg: e, // bos response
+
+      // arrived, // amount arrived at destination
+      // sent, // total sats sent|spent from source
+      // fee, // sats paid for fee
+
+      ppmSuggested // fee rate suggested
     }
   }
 }
@@ -225,27 +242,42 @@ const send = async (
     destination, // public key, kind of important
     fromChannel = undefined, // public key
     toChannel = undefined, // public key
-    sats = 1,
+    sats = 1, // how much needs to arrive at destination
     maxMinutes = 1,
-    maxFeeRate = 100,
-    message = undefined, // string to send,
-    retryOnTimeout = false
+    maxFeeRate = undefined, // ppm, rounded up to next sat
+    // use smaller of these fee limits:
+    maxFee = undefined, // max fee sats, 1 sat fee per 1 sat arriving somewhere is default max
+    message = undefined, // string to send (reveals sender when used)
+    // retryAvoidsOnTimeout = 0
+    isRebalance = true
   },
   log = { details: false, progress: true },
   retry = false
 ) => {
-  const options = {
-    destination,
-    out_through: fromChannel,
-    in_through: toChannel,
-    amount: String(trunc(sats)),
-    timeout_minutes: trunc(maxMinutes),
-    // uses max fee (sats) only so calculated from max fee rate (ppm)
-    max_fee: trunc(sats * maxFeeRate * 1e-6 + 1),
-    message
-  }
   try {
-    log?.details && console.boring(`${getDate()} bos.send() to ${destination}`, log ? JSON.stringify(options) : '')
+    const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
+    maxFee = maxFee ?? sats
+    maxFeeRate = maxFeeRate ?? trunc(((1.0 * maxFee) / sats) * 1e6)
+    const options = {
+      destination,
+      out_through: fromChannel,
+      in_through: toChannel,
+      amount: String(trunc(sats)),
+      timeout_minutes: trunc(maxMinutes),
+      // uses max fee (sats) only so calculated from max fee rate (ppm)
+      max_fee: min(
+        ceil((sats * maxFeeRate) / 1e6), // from fee rate rounded up to next sat
+        maxFee // from max fee in exact sats
+      ),
+      message
+    }
+
+    log?.details && console.boring(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
+
+    if (fromChannel === toChannel && toChannel !== undefined) throw new Error('fromChannel same as toChannel')
+    if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
+    if (isRebalance && !(fromChannel && toChannel)) throw new Error('need to specify from and to channels')
+
     const res = await bosPushPayment({
       lnd: await mylnd(),
       logger: logger(log),
@@ -258,12 +290,24 @@ const send = async (
     })
     log?.progress && console.log('')
     log?.details && console.log(`\n${getDate()} bos.send() success:`, JSON.stringify(res))
+    const sent = +res.paid
+    const arrived = +res.paid - +res.fee
+    const totalFee = +res.fee
     return {
-      fee_rate: trunc(((1.0 * +res.fee) / +res.paid) * 1e6),
-      sent: trunc(+res.paid), // total sent including fee
-      paidTarget: trunc(+res.paid - +res.fee), // sent excluding fee
-      msg: res
+      // failed: false,
+      fee_rate: trunc(((1.0 * totalFee) / arrived) * 1e6),
+      msg: res, // bos info
+
+      arrived, // amount arrived at destination
+      sent, // total sent (spent) including fee
+      fee: totalFee
+
+      // ppmSuggested: null
     }
+    // example of successful payment res
+    /*
+    {"fee":1,"id":"aaaaaaaaaaaaaccccccccccccddddddddddeeeeeeeeeeee","latency_ms":17543,"paid":1001,"preimage":"fffffffffffffgggggggggggggghhhhhhhhhhhhhhhhiiiiiiiiiiiii","relays":["030c3f19d742ca294a55c00376b3b355c3c90d61c6b6b39554dbc7ac19b141c14f","0260fab633066ed7b1d9b9b8a0fac87e1579d1709e874d28a0d171a1f5c43bb877","0340796fc55aec99d8f142659cd67e19080100a98ea14e8916525789b57e054eb3","03d1e805c38257b713340049745ff5a15d9ee5d733517a1d48a956815c9482055c"],"success":["696272x1444x1","679020x1484x0","687689x770x1","694601x1655x0"]}
+    */
   } catch (e) {
     log?.progress && console.log('')
     log?.details && console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
@@ -283,14 +327,20 @@ const send = async (
           maxFeeRate
         },
         log,
-        true
+        true // mark it as a retry
       )
     }
-    const suggestedFeeRate = e[1] === 'MaxFeeLimitTooLow' ? trunc(((1.0 * +e[2].needed_fee) / sats) * 1e6 + 1.0) : null
+    const suggestedFeeRate = e[1] === 'MaxFeeLimitTooLow' ? ceil(((1.0 * +e[2].needed_fee) / sats) * 1e6) : null
     return {
       failed: true,
-      ppmSuggested: suggestedFeeRate,
-      msg: e
+      // fee_rate,
+      msg: e,
+
+      // arrived,
+      // sent,
+      // fee,
+
+      ppmSuggested: suggestedFeeRate
     }
   }
 }
@@ -745,8 +795,11 @@ const setPeerPolicy = async (
 
     // get channels for my node with this peer
     const channels = await getNodeChannels({ public_key: me, peer_key })
-    if (!channels) return 1
-    // log && console.log(`${getDate()} channels before changes: ${JSON.stringify(channels, fixJSON, 2)}`)
+    if (!channels) throw new Error('getNodeChannels returned nothing')
+    if (Object.keys(channels).length === 0) {
+      throw new Error('getNodeChannels returned {}, no current peer data')
+    }
+    log && console.log(`${getDate()} channels before changes: ${JSON.stringify(channels, fixJSON, 2)}`)
 
     // set settings for each channel with that peer & use ones provided to replace
     for (const channel of Object.values(channels)) {
@@ -773,13 +826,14 @@ const setPeerPolicy = async (
         max_htlc_mtokens: String(max_htlc_msats)
       }
       log && console.log('bos call updateRoutingFees', settings)
-      const result = await bos.callAPI('updateRoutingFees', settings)
-      log && console.log({ result })
+      // const result =
+      await bos.callAPI('updateRoutingFees', settings)
+      // log && console.log({ result })
     }
 
     return 0
   } catch (e) {
-    console.error('error:', JSON.stringify(e), 'with settings:', settings)
+    log && console.error('error:', e, 'with settings:', settings)
     return 1
   }
 }
@@ -805,7 +859,7 @@ const logger = log => ({
   error: v => (log?.details ? console.error(getDate(), v) : log?.progress ? process.stdout.write('!') : null)
 })
 
-console.boring = args => console.log(`\x1b[2m${args}\x1b[0m`)
+console.boring = (...args) => console.log(`\x1b[2m${args}\x1b[0m`)
 
 const stylingPatterns =
   // eslint-disable-next-line no-control-regex
