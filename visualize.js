@@ -15,6 +15,7 @@
 // http://localhost:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
 // http://localhost:7890/?daysForStats=7&xAxis=ppm&yAxis=earned&rAxis=routed
 // http://localhost:7890/?daysForStats=7&xAxis=days&yAxis=earned&rAxis=count&xGroups=20
+// http://localhost:7890/?daysForStats=30&yAxis=count&xAxis=routed&xGroups=21&type=line
 
 import bos from './bos.js'
 import fs from 'fs'
@@ -115,7 +116,7 @@ const generatePage = async ({
   // turn into data
   const data = peerForwards.map(p => {
     return {
-      ppm: (1e6 * abs(p.fee_mtokens - 0)) / p.mtokens + 1,
+      ppm: (1e6 * p.fee_mtokens) / p.mtokens,
       // days since earliest event
       // days: (p.created_at_ms - maxTime) / 1000 / 60 / 60 / 24,
       days: -(Date.now() - p.created_at_ms) / 1000 / 60 / 60 / 24,
@@ -139,8 +140,8 @@ const generatePage = async ({
 
   const multiple = pow(xMax / xMin, 1 / xGroups)
   const logLevels = []
-  for (let i = 0; i < xGroups; i++) logLevels.push(xMin * pow(multiple, i))
-  const gLog = v => logLevels.find(L => L > v)
+  for (let i = 0; i <= xGroups + 1; i++) logLevels.push(xMin * pow(multiple, i))
+  const gLog = v => logLevels.find(L => L > v) * pow(multiple, -0.5) // move half way down
   const gLinear = (v, size) => ceil(v / size) * size // + 0.5 * size // was wrapped in trunc
 
   const dataGroups = {}
@@ -153,7 +154,7 @@ const generatePage = async ({
       const routed = (dataGroups[String(group)]?.routed || 0) + d.routed
       const earned = (dataGroups[String(group)]?.earned || 0) + d.earned
       const count = (dataGroups[String(group)]?.count || 0) + 1
-      dataGroups[String(group)] = { days, routed, earned, count, ppm }
+      dataGroups[String(group)] = { days, routed, earned, count, ppm, group }
     })
   }
 
@@ -166,7 +167,7 @@ const generatePage = async ({
 
   const dataForPlot = (isGrouped ? dataAfterGrouping : data)
     // including everything plus actually define x, y, r
-    .map(d => ({ ...d, x: d[xAxis], y: d[yAxis], r: sqrt(d[rAxis] || 1) }))
+    .map(d => ({ ...d, x: d.group ?? d[xAxis], y: d[yAxis], r: sqrt(d[rAxis] || 1) }))
     // for line plots this helps
     .fsort((a, b) => a.x - b.x)
 
@@ -193,6 +194,8 @@ const generatePage = async ({
   // annoys me can't see max axis label on some log axis
   const logMaxX = logPlots.some(a => a === xAxis) ? pow(10, ceil(log10(xMaxPlot))) : null
   const logMaxY = logPlots.some(a => a === yAxis) ? pow(10, ceil(log10(yMaxPlot))) : null
+
+  // console.log({ logMaxX, logMaxY, xMaxPlot, yMaxPlot })
 
   // https://cdnjs.com/libraries/Chart.js
   // prettier-ignore
