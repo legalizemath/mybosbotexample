@@ -148,10 +148,10 @@ const generatePage = async ({
 
   const multiple = pow(xMax / xMin, 1 / xGroups)
   const logLevels = []
-  if (isLogX) {
+  if (isLogX & isGrouped) {
     for (let i = 0; i < xGroups; i++) logLevels.unshift(xMin * pow(multiple, i))
   }
-  console.log({ multiple, xMax, xMin, xGroups, logLevels, logLevelsLength: logLevels.length })
+  // if (isLogX & isGrouped) console.log({ multiple, xMax, xMin, xGroups, logLevels, logLevelsLength: logLevels.length })
   // find highest "rounded" level below data point and then move 1/2 level up for middle of range
   const gLog = v => (logLevels.find(L => L <= v) || logLevels[logLevels.length - 1]) * pow(multiple, 0.5) //
   const gLinear = (v, size) => ceil(v / size) * size // + 0.5 * size // was wrapped in trunc
