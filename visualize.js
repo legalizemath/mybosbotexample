@@ -96,6 +96,7 @@ const generatePage = async ({
     peerForwards = peersForwards
   }
 
+  console.log(peerForwards[0])
   console.log('loaded forwards, n:', peerForwards.length, out)
 
   // console.log(Object.keys(peersForwards).length)
@@ -114,12 +115,13 @@ const generatePage = async ({
   const [minTime, maxTime] = getMinMax(peerForwards.map(f => f.created_at_ms))
 
   // turn into data
+  const now = Date.now()
   const data = peerForwards.map(p => {
     return {
       ppm: (1e6 * p.fee_mtokens) / p.mtokens,
       // days since earliest event
       // days: (p.created_at_ms - maxTime) / 1000 / 60 / 60 / 24,
-      days: -(Date.now() - p.created_at_ms) / 1000 / 60 / 60 / 24,
+      days: -(now - p.created_at_ms) / 1000 / 60 / 60 / 24,
       time: new Date(p.created_at_ms).toISOString(),
       // hour: (new Date(p.created_at_ms).getUTCHours() + 24 - 5) % 24, // 24 hours EST time
       routed: p.mtokens / 1000,
@@ -149,11 +151,11 @@ const generatePage = async ({
     data.forEach(d => {
       // const group = gLog(d.ppm) // gLinear(d.ppm, xSize)
       const group = logPlots.some(a => a === xAxis) ? gLog(d[xAxis]) : gLinear(d[xAxis], linSize)
-      const ppm = xAxis === 'ppm' ? group : d.ppm
-      const days = xAxis === 'days' ? group : d.days
       const routed = (dataGroups[String(group)]?.routed || 0) + d.routed
       const earned = (dataGroups[String(group)]?.earned || 0) + d.earned
       const count = (dataGroups[String(group)]?.count || 0) + 1
+      const ppm = xAxis === 'ppm' ? group : (earned / routed) * 1e6
+      const days = xAxis === 'days' ? group : d.days
       dataGroups[String(group)] = { days, routed, earned, count, ppm, group }
     })
   }
@@ -194,6 +196,13 @@ const generatePage = async ({
   // annoys me can't see max axis label on some log axis
   const logMaxX = logPlots.some(a => a === xAxis) ? pow(10, ceil(log10(xMaxPlot))) : null
   const logMaxY = logPlots.some(a => a === yAxis) ? pow(10, ceil(log10(yMaxPlot))) : null
+
+  // if few enough show what specific events are
+  if (!isGrouped && dataForPlot.length < 42) {
+    for (const f of dataForPlot) {
+      console.log(`from: ${f.from.padEnd(28)} to: ${f.to.padEnd(28)} amt: ${f.routed.toFixed(3).padStart(15)}`)
+    }
+  }
 
   // console.log({ logMaxX, logMaxY, xMaxPlot, yMaxPlot })
 
