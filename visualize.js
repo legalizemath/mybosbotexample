@@ -13,6 +13,8 @@
 // http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
 // http://localhost:7890/?daysForStats=30&xAxis=days&yAxis=earned&xGroups=10&type=line
 // http://localhost:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
+// http://localhost:7890/?daysForStats=7&xAxis=ppm&yAxis=earned&rAxis=routed
+// http://localhost:7890/?daysForStats=7&xAxis=days&yAxis=earned&rAxis=count&xGroups=20
 
 import bos from './bos.js'
 import fs from 'fs'
@@ -24,7 +26,7 @@ const HOST = 'localhost'
 const HTML_PORT = '7890' // 80 probably taken
 
 // eslint-disable-next-line no-unused-vars
-const { max, min, floor, ceil, abs, trunc, log, exp, sqrt, pow } = Math
+const { max, min, floor, ceil, abs, trunc, log, exp, sqrt, pow, log10 } = Math
 // eslint-disable-next-line no-extend-native
 Object.defineProperty(Array.prototype, 'fsort', {
   value: function (compare) {
@@ -132,6 +134,7 @@ const generatePage = async ({
   const isGrouped = xGroups !== 0
 
   const [xMin, xMax] = getMinMax(data.map(d => d[xAxis]))
+
   const linSize = abs(xMax - xMin) / xGroups
 
   const multiple = pow(xMax / xMin, 1 / xGroups)
@@ -167,8 +170,6 @@ const generatePage = async ({
     // for line plots this helps
     .fsort((a, b) => a.x - b.x)
 
-  // console.log('groups:', dataForPlot.length, 'e.g.', dataForPlot[dataForPlot.length - 1])
-
   // fix radius
   const [rMin, rMax] = getMinMax(dataForPlot.map(d2 => d2.r))
   const scaleFromTo = ({ v, minFrom, maxFrom, minTo, maxTo }) =>
@@ -181,10 +182,17 @@ const generatePage = async ({
 
   console.log('showing points:', dataForPlot.length)
 
+  const [xMinPlot, xMaxPlot] = getMinMax(dataForPlot.map(d => d.x))
+  const [yMinPlot, yMaxPlot] = getMinMax(dataForPlot.map(d => d.y))
+
   const dataString1 = JSON.stringify(dataForPlot)
 
   const outOf = out ? 'out of ' + peerOut?.alias : ''
   const inFrom = from ? 'in from ' + peerIn?.alias : ''
+
+  // annoys me can't see max axis label on some log axis
+  const logMaxX = logPlots.some(a => a === xAxis) ? pow(10, ceil(log10(xMaxPlot))) : null
+  const logMaxY = logPlots.some(a => a === yAxis) ? pow(10, ceil(log10(yMaxPlot))) : null
 
   // https://cdnjs.com/libraries/Chart.js
   // prettier-ignore
@@ -247,7 +255,7 @@ const generatePage = async ({
         type: '${logPlots.some(a => a === xAxis) ? 'logarithmic' : 'linear'}',
         // type: 'linear',
         // min: 100,
-        // max: 1e6,
+        ${logMaxX ? 'max: ' + logMaxX + ',' : ''}
         suggestedMax: 0,
         position: 'bottom',
         grace: '10%',
@@ -259,7 +267,7 @@ const generatePage = async ({
       y: {
         type: '${logPlots.some(a => a === yAxis) ? 'logarithmic' : 'linear'}',
         // min: 100,
-        // max: 100e3,
+        ${logMaxY ? 'max: ' + logMaxY + ',' : ''}
         // suggestedMax: 100e6,
         grace: '10%',
         position: 'left',
