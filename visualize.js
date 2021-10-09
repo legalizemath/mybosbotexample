@@ -54,7 +54,9 @@ const generatePage = async ({
   from = '', // partial alias or public key match
   type = 'bubble' // can also be line
 }) => {
-  // const out = process.argv.slice(2).join(' ')
+  // ensure integers where necessary
+  if (xGroups) xGroups = +xGroups
+  if (daysForStats) daysForStats = +daysForStats
 
   let peerForwards = []
   const pubkeyToAlias = {}
@@ -96,7 +98,7 @@ const generatePage = async ({
     peerForwards = peersForwards
   }
 
-  console.log(peerForwards[0])
+  // console.log(peerForwards[0])
   console.log('loaded forwards, n:', peerForwards.length, out)
 
   // console.log(Object.keys(peersForwards).length)
@@ -136,25 +138,35 @@ const generatePage = async ({
   const isTimeOnX = xAxis === 'days'
   const isGrouped = xGroups !== 0
 
-  const [xMin, xMax] = getMinMax(data.map(d => d[xAxis]))
+  const isLogX = logPlots.some(a => a === xAxis)
+  const isLogY = logPlots.some(a => a === yAxis)
+
+  // use non-0 values only for log plot
+  const [xMin, xMax] = getMinMax(data.map(d => d[xAxis]).filter(d => !isLogX || d > 0))
 
   const linSize = abs(xMax - xMin) / xGroups
 
   const multiple = pow(xMax / xMin, 1 / xGroups)
   const logLevels = []
-  for (let i = 0; i <= xGroups + 1; i++) logLevels.push(xMin * pow(multiple, i))
-  const gLog = v => logLevels.find(L => L > v) * pow(multiple, -0.5) // move half way down
+  if (isLogX) {
+    for (let i = 0; i < xGroups; i++) logLevels.unshift(xMin * pow(multiple, i))
+  }
+  console.log({ multiple, xMax, xMin, xGroups, logLevels, logLevelsLength: logLevels.length })
+  // find highest "rounded" level below data point and then move 1/2 level up for middle of range
+  const gLog = v => (logLevels.find(L => L <= v) || logLevels[logLevels.length - 1]) * pow(multiple, 0.5) //
   const gLinear = (v, size) => ceil(v / size) * size // + 0.5 * size // was wrapped in trunc
 
   const dataGroups = {}
   if (isGrouped) {
     data.forEach(d => {
       // const group = gLog(d.ppm) // gLinear(d.ppm, xSize)
-      const group = logPlots.some(a => a === xAxis) ? gLog(d[xAxis]) : gLinear(d[xAxis], linSize)
+      const group = isLogX ? gLog(d[xAxis]) : gLinear(d[xAxis], linSize)
+      // if (group === undefined) console.log(gLinear(d[xAxis], linSize))
       const routed = (dataGroups[String(group)]?.routed || 0) + d.routed
       const earned = (dataGroups[String(group)]?.earned || 0) + d.earned
       const count = (dataGroups[String(group)]?.count || 0) + 1
-      const ppm = xAxis === 'ppm' ? group : (earned / routed) * 1e6
+      // const ppm = xAxis === 'ppm' ? group : (earned / routed) * 1e6
+      const ppm = (earned / routed) * 1e6 // actual total effective ppm
       const days = xAxis === 'days' ? group : d.days
       dataGroups[String(group)] = { days, routed, earned, count, ppm, group }
     })
@@ -183,8 +195,6 @@ const generatePage = async ({
     d2.r = scaleFromTo({ v: d2.r, minFrom: rMin, maxFrom: rMax, minTo: MIN_RADIUS_PX, maxTo: MAX_RADIUS_PX })
   })
 
-  console.log('showing points:', dataForPlot.length)
-
   const [xMinPlot, xMaxPlot] = getMinMax(dataForPlot.map(d => d.x))
   const [yMinPlot, yMaxPlot] = getMinMax(dataForPlot.map(d => d.y))
 
@@ -194,8 +204,8 @@ const generatePage = async ({
   const inFrom = from ? 'in from ' + peerIn?.alias : ''
 
   // annoys me can't see max axis label on some log axis
-  const logMaxX = logPlots.some(a => a === xAxis) ? pow(10, ceil(log10(xMaxPlot))) : null
-  const logMaxY = logPlots.some(a => a === yAxis) ? pow(10, ceil(log10(yMaxPlot))) : null
+  const logMaxX = isLogX ? pow(10, ceil(log10(xMaxPlot))) : null
+  const logMaxY = isLogY ? pow(10, ceil(log10(yMaxPlot))) : null
 
   // if few enough show what specific events are
   if (!isGrouped && dataForPlot.length < 42) {
@@ -204,6 +214,8 @@ const generatePage = async ({
     }
   }
 
+  console.log('showing points:', dataForPlot.length)
+  // console.log(dataForPlot[0])
   // console.log({ logMaxX, logMaxY, xMaxPlot, yMaxPlot })
 
   // https://cdnjs.com/libraries/Chart.js
@@ -264,7 +276,7 @@ const generatePage = async ({
     lineTension: 0.5,
     scales: {
       x: {
-        type: '${logPlots.some(a => a === xAxis) ? 'logarithmic' : 'linear'}',
+        type: '${isLogX ? 'logarithmic' : 'linear'}',
         // type: 'linear',
         // min: 100,
         ${logMaxX ? 'max: ' + logMaxX + ',' : ''}
@@ -277,7 +289,7 @@ const generatePage = async ({
         }
       },
       y: {
-        type: '${logPlots.some(a => a === yAxis) ? 'logarithmic' : 'linear'}',
+        type: '${isLogY ? 'logarithmic' : 'linear'}',
         // min: 100,
         ${logMaxY ? 'max: ' + logMaxY + ',' : ''}
         // suggestedMax: 100e6,
