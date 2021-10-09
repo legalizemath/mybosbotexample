@@ -1,4 +1,4 @@
-// run with: node visualize
+// run with: npm link balanceofsatoshis && node visualize
 // needs bos.js, the wrapper, in same folder
 // then just need to open the page and set settings with query string
 // xAxis, yAxis, and rAxis can be set to days', ppm, routed, earned, count (for grouped)
@@ -11,7 +11,7 @@
 // http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&from=acinq
 // http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned
 // http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
-// http://localhost:7890/?daysForStats=30&xAxis=days&yAxis=earned&xGroups=10&type=line
+// http://localhost:7890/?daysForStats=90&xAxis=days&yAxis=earned&xGroups=10&type=line
 // http://localhost:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
 // http://localhost:7890/?daysForStats=7&xAxis=ppm&yAxis=earned&rAxis=routed
 // http://localhost:7890/?daysForStats=7&xAxis=days&yAxis=earned&rAxis=count&xGroups=20
