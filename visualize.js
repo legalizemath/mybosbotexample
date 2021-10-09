@@ -1,5 +1,17 @@
 // run with: node visualize
 // needs bos.js, the wrapper, in same folder
+// then just need to open the page and set settings with query string
+// xAxis, yAxis, and rAxis can be set to days', ppm, routed, earned, count (for grouped)
+// can combine items into xGroups number of groups along x axis
+// ppm, routed, earned will be plotted in log scale, days in linear
+// e.g.
+// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned
+// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&xGroups=10
+// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&out=aci
+// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&from=acinq
+// http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned
+// http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
+// http://localhost:7890/?daysForStats=30&xAxis=days&yAxis=earned&xGroups=10&type=line
 
 import bos from './bos.js'
 import fs from 'fs'
@@ -28,7 +40,16 @@ Object.defineProperty(Array.prototype, 'fsort', {
 
 const logPlots = ['ppm', 'earned', 'routed']
 
-const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '', yAxis = '', out = '', from = '' }) => {
+const generatePage = async ({
+  daysForStats,
+  xGroups = 0, // round number of groups along x axis
+  rAxis = '', // ppm, earned, routed, count
+  xAxis = '', // days, ppm, earned, routed
+  yAxis = '', // days, ppm, earned, routed, count
+  out = '', // partial alias or public key match
+  from = '', // partial alias or public key match
+  type = 'bubble' // can also be line
+}) => {
   // const out = process.argv.slice(2).join(' ')
 
   let peerForwards = []
@@ -93,7 +114,8 @@ const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '',
     return {
       ppm: (1e6 * abs(p.fee_mtokens - 0)) / p.mtokens + 1,
       // days since earliest event
-      days: (p.created_at_ms - maxTime) / 1000 / 60 / 60 / 24,
+      // days: (p.created_at_ms - maxTime) / 1000 / 60 / 60 / 24,
+      days: -(Date.now() - p.created_at_ms) / 1000 / 60 / 60 / 24,
       time: new Date(p.created_at_ms).toISOString(),
       // hour: (new Date(p.created_at_ms).getUTCHours() + 24 - 5) % 24, // 24 hours EST time
       routed: p.mtokens / 1000,
@@ -114,14 +136,14 @@ const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '',
   const multiple = pow(xMax / xMin, 1 / xGroups)
   const logLevels = []
   for (let i = 0; i < xGroups; i++) logLevels.push(xMin * pow(multiple, i))
-  // const gLog = v => logLevels.find(L => L > v)
+  const gLog = v => logLevels.find(L => L > v)
   const gLinear = (v, size) => ceil(v / size) * size // + 0.5 * size // was wrapped in trunc
 
   const dataGroups = {}
   if (isGrouped) {
     data.forEach(d => {
       // const group = gLog(d.ppm) // gLinear(d.ppm, xSize)
-      const group = gLinear(d[xAxis], linSize)
+      const group = logPlots.some(a => a === xAxis) ? gLog(d[xAxis]) : gLinear(d[xAxis], linSize)
       const ppm = xAxis === 'ppm' ? group : d.ppm
       const days = xAxis === 'days' ? group : d.days
       const routed = (dataGroups[String(group)]?.routed || 0) + d.routed
@@ -156,7 +178,7 @@ const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '',
     d2.r = scaleFromTo({ v: d2.r, minFrom: rMin, maxFrom: rMax, minTo: MIN_RADIUS_PX, maxTo: MAX_RADIUS_PX })
   })
 
-  console.log(dataForPlot)
+  console.log('showing points:', dataForPlot.length)
 
   const dataString1 = JSON.stringify(dataForPlot)
 
@@ -225,6 +247,7 @@ const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '',
         // type: 'linear',
         // min: 100,
         // max: 1e6,
+        suggestedMax: 0,
         position: 'bottom',
         grace: '10%',
         title: {
@@ -264,7 +287,7 @@ const generatePage = async ({ daysForStats, xGroups = 0, rAxis = '', xAxis = '',
     ]
   }
   new Chart('chart', {
-    type: 'bubble',
+    type: '${type}',
     options,
     data
   })
