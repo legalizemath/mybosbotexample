@@ -45,11 +45,11 @@ Object.defineProperty(Array.prototype, 'fsort', {
 const logPlots = ['ppm', 'earned', 'routed']
 
 const generatePage = async ({
-  daysForStats,
+  daysForStats = 7,
   xGroups = 0, // round number of groups along x axis
   rAxis = '', // ppm, earned, routed, count
-  xAxis = '', // days, ppm, earned, routed
-  yAxis = '', // days, ppm, earned, routed, count
+  xAxis = 'ppm', // days, ppm, earned, routed
+  yAxis = 'routed', // days, ppm, earned, routed, count
   out = '', // partial alias or public key match
   from = '', // partial alias or public key match
   type = 'bubble' // can also be line
@@ -324,7 +324,6 @@ const generatePage = async ({
     res.setHeader('Content-Type', 'text/html')
     res.writeHead(200)
     const pageSettings = {
-      daysForStats: 30,
       ...(q || {})
     }
     console.log({ pageSettings })
