@@ -12,6 +12,7 @@
 // http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned
 // http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
 // http://localhost:7890/?daysForStats=30&xAxis=days&yAxis=earned&xGroups=10&type=line
+// http://localhost:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
 
 import bos from './bos.js'
 import fs from 'fs'
@@ -162,7 +163,7 @@ const generatePage = async ({
 
   const dataForPlot = (isGrouped ? dataAfterGrouping : data)
     // including everything plus actually define x, y, r
-    .map(d => ({ ...d, x: d[xAxis], y: d[yAxis], r: d[rAxis] }))
+    .map(d => ({ ...d, x: d[xAxis], y: d[yAxis], r: sqrt(d[rAxis] || 1) }))
     // for line plots this helps
     .fsort((a, b) => a.x - b.x)
 
@@ -173,7 +174,7 @@ const generatePage = async ({
   const scaleFromTo = ({ v, minFrom, maxFrom, minTo, maxTo }) =>
     maxFrom > minFrom ? ((v - minFrom) / (maxFrom - minFrom)) * (maxTo - minTo) + minTo : minTo
   const MIN_RADIUS_PX = 2
-  const MAX_RADIUS_PX = 10
+  const MAX_RADIUS_PX = 8
   dataForPlot.forEach(d2 => {
     d2.r = scaleFromTo({ v: d2.r, minFrom: rMin, maxFrom: rMax, minTo: MIN_RADIUS_PX, maxTo: MAX_RADIUS_PX })
   })
@@ -272,7 +273,7 @@ const generatePage = async ({
 
   Chart.defaults.font.size = 21
 
-  const labelRadius = '${rAxis ? rAxis + ', ' : ' '}'
+  const labelRadius = '${rAxis && type === 'bubble' ? 'area ∝ ' + rAxis + ', ' : ' '}'
   const labelGroups = '${xGroups ? `grouped into ${xGroups} x-axis regions, ` : ' '}'
   const labelCount = 'forwards count: ${peerForwards.length}'
   const data = {
