@@ -19,11 +19,12 @@
 
 import bos from './bos.js'
 import fs from 'fs'
+import os from 'os'
 
 import http from 'http'
 import url from 'url'
 
-const HOST = 'localhost'
+let networkLocation = 'localhost' // will try to overwrite with local network address
 const HTML_PORT = '7890' // 80 probably taken
 
 // eslint-disable-next-line no-unused-vars
@@ -195,8 +196,8 @@ const generatePage = async ({
     d2.r = scaleFromTo({ v: d2.r, minFrom: rMin, maxFrom: rMax, minTo: MIN_RADIUS_PX, maxTo: MAX_RADIUS_PX })
   })
 
-  const [xMinPlot, xMaxPlot] = getMinMax(dataForPlot.map(d => d.x))
-  const [yMinPlot, yMaxPlot] = getMinMax(dataForPlot.map(d => d.y))
+  const [, xMaxPlot] = getMinMax(dataForPlot.map(d => d.x))
+  const [, yMaxPlot] = getMinMax(dataForPlot.map(d => d.y))
 
   const dataString1 = JSON.stringify(dataForPlot)
 
@@ -334,6 +335,22 @@ const generatePage = async ({
   return myPage
 }
 
+// this gets local network ip
+const interfaces = os.networkInterfaces()
+for (const k in interfaces) {
+  for (const k2 in interfaces[k]) {
+    const address = interfaces[k][k2]
+    if (address.address.startsWith('192.168')) {
+      networkLocation = address.address
+      break
+    }
+  }
+}
+
+if (networkLocation === 'localhost') {
+  console.log('no local network ip found')
+}
+
 // serve html on HOST:HTML_PORT
 ;(async () => {
   const server = http.createServer(async (req, res) => {
@@ -350,7 +367,11 @@ const generatePage = async ({
     console.log({ pageSettings })
     res.end(await generatePage(pageSettings))
   })
-  server.listen(HTML_PORT, HOST, () => {
-    console.log(`Visualization is available on http://${HOST}:${HTML_PORT}`)
+  server.listen(HTML_PORT, networkLocation, () => {
+    console.log(`Visualization is available on local computer at http://localhost:${HTML_PORT}`)
+    if (networkLocation !== 'localhost') {
+      console.log(`Visualization is available on local network at http://${networkLocation}:${HTML_PORT}`)
+      console.log(`If port is closed might need to open. On ubuntu with ufw firewall: sudo ufw allow ${HTML_PORT}`)
+    }
   })
 })()
