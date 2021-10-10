@@ -349,7 +349,7 @@ if (networkLocation === 'localhost') {
 ;(async () => {
   const server = http.createServer(async (req, res) => {
     // print request url info
-    const pageSettings = url.parse(req.url, true).query
+    const pageSettings = { ...url.parse(req.url, true).query }
     // console.log(url.parse(req.url, true))
 
     // generate response
