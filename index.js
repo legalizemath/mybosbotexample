@@ -1,6 +1,8 @@
 // basic example of a looping bot
 // EXAMPLE ONLY, DO NOT USE
 
+asdasdasd
+
 import bos from './bos.js' // my wrappers for bos in bos.js file
 
 // max and min adjusting fee to use (ppm)
