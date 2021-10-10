@@ -1,21 +1,24 @@
+// needs visualize.js and bos.js, the wrapper, in same folder
 // run with: npm link balanceofsatoshis && node visualize
-// needs bos.js, the wrapper, in same folder
+// makes webpage visual available on local machine at e.g. http://localhost:7890
+// and local network at e.g. http://192.168.1.123:7890
+// umbrel shortcut for local address also works with port specified, e.g.: http://umbrel.local:7890
 // then just need to open the page and set settings with query string
 // xAxis, yAxis, and rAxis can be set to days', ppm, routed, earned, count (for grouped)
 // can combine items into xGroups number of groups along x axis
 // ppm, routed, earned will be plotted in log scale, days in linear
 // e.g.
-// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned
-// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&xGroups=10
-// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&out=aci
-// http://localhost:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&from=acinq
-// http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned
-// http://localhost:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
-// http://localhost:7890/?daysForStats=90&xAxis=days&yAxis=earned&xGroups=10&type=line
-// http://localhost:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
-// http://localhost:7890/?daysForStats=7&xAxis=ppm&yAxis=earned&rAxis=routed
-// http://localhost:7890/?daysForStats=7&xAxis=days&yAxis=earned&rAxis=count&xGroups=20
-// http://localhost:7890/?daysForStats=30&yAxis=count&xAxis=routed&xGroups=21&type=line
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&xGroups=10
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&out=aci
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&from=acinq
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=days&yAxis=earned
+// http://192.168.1.123:7890/?daysForStats=14&xAxis=days&yAxis=earned&xGroups=10
+// http://192.168.1.123:7890/?daysForStats=90&xAxis=days&yAxis=earned&xGroups=10&type=line
+// http://192.168.1.123:7890/?daysForStats=30&xAxis=ppm&yAxis=earned&rAxis=count&xGroups=15
+// http://192.168.1.123:7890/?daysForStats=7&xAxis=ppm&yAxis=earned&rAxis=routed
+// http://192.168.1.123:7890/?daysForStats=7&xAxis=days&yAxis=earned&rAxis=count&xGroups=20
+// http://192.168.1.123:7890/?daysForStats=30&yAxis=count&xAxis=routed&xGroups=21&type=line
 
 import bos from './bos.js'
 import fs from 'fs'
@@ -244,7 +247,6 @@ const generatePage = async ({
   <div class="chart-container" style="position: relative; height: 80vh; width: 80vw; margin: 3vh auto;">
   <canvas id="chart" width="400" height="400"></canvas>
   </div>
-
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.5.1/chart.min.js"
     integrity="sha512-Wt1bJGtlnMtGP0dqNFH1xlkLBNpEodaiQ8ZN5JLA5wpc1sUlk/O5uuOMNgvzddzkpvZ9GLyYNa8w2s7rqiTk5Q=="
@@ -254,14 +256,6 @@ const generatePage = async ({
   <script>
   /* eslint-disable */
   const options = {
-    // tooltips: {
-    //   mode: 'index',
-    //   intersect: false
-    // },
-    // hover: {
-    //   mode: 'index',
-    //   intersect: false
-    // },
     plugins: {
       tooltip: {
         callbacks: {
@@ -355,20 +349,25 @@ if (networkLocation === 'localhost') {
 ;(async () => {
   const server = http.createServer(async (req, res) => {
     // print request url info
-    const q = url.parse(req.url, true).query
+    const pageSettings = url.parse(req.url, true).query
     // console.log(url.parse(req.url, true))
 
     // generate response
     res.setHeader('Content-Type', 'text/html')
-    res.writeHead(200)
-    const pageSettings = {
-      ...(q || {})
-    }
     console.log({ pageSettings })
-    res.end(await generatePage(pageSettings))
+    if (!pageSettings || !Object.keys(pageSettings).length) {
+      // redirect to page with querry items written out for easier editing
+
+      res.writeHead(301, { Location: '/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=routed&out=&from=&type=bubble' })
+      res.end()
+    } else {
+      // return the full html page from string
+      res.writeHead(200)
+      res.end(await generatePage(pageSettings))
+    }
   })
-  server.listen(HTML_PORT, networkLocation, () => {
-    console.log(`Visualization is available on local computer at http://localhost:${HTML_PORT}`)
+  server.listen(HTML_PORT, () => {
+    console.log(`Visualization is available on lnd computer at http://localhost:${HTML_PORT}`)
     if (networkLocation !== 'localhost') {
       console.log(`Visualization is available on local network at http://${networkLocation}:${HTML_PORT}`)
       console.log(`If port is closed might need to open. On ubuntu with ufw firewall: sudo ufw allow ${HTML_PORT}`)
