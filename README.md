@@ -22,7 +22,7 @@ I used these installation guides so I can run bos commands like `bos utxos` from
 * https://github.com/alexbosworth/balanceofsatoshis#install
 * https://github.com/alexbosworth/balanceofsatoshis#saved-nodes
 
-Then I created package.json with `{ "type": "module" }` for imports to work, then I place wrapper bos.js and somescript.js file into same folder
+Then I created package.json with `{ "type": "module" }` for imports to work, then I place wrapper `bos.js` and script like `somescript.js` file into same folder
 
 and I run somescript.js via
 
