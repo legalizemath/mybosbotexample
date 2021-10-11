@@ -15,7 +15,7 @@ const initialize = async () => {
   })
   const res = fs.readdirSync(LOG_FILES) || []
   const paymentLogFiles = res.filter(f => f.match(/_paymentHistory/))
-  const isRecent = t => Date.now() - t < DAYS_FOR_STATS * 24 * 60 * 60 * 1000
+  const isRecent = t => Date.now() - +t < DAYS_FOR_STATS * 24 * 60 * 60 * 1000
   console.boring(`${getDate()} ${getPaymentEvents.length} payment records found in db`)
   for (const fileName of paymentLogFiles) {
     const timestamp = fileName.split('_')[0]
