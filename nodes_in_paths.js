@@ -2,12 +2,12 @@ import fs from 'fs'
 import bos from './bos.js'
 
 const LOG_FILES = './logs'
-const DAYS_FOR_STATS = 14
+const DAYS_FOR_STATS = 60
 const SNAPSHOTS_PATH = './snapshots'
-const SHOW_PEERS = false
+const SHOW_PEERS = true
 
 const initialize = async () => {
-  const me = (await bos.callAPI('getIdentity')).public_key
+  const me = (await bos.callAPI('getIdentity'))?.public_key
 
   // get payments
   const getPaymentEvents = await bos.customGetPaymentEvents({
@@ -15,7 +15,7 @@ const initialize = async () => {
   })
   const res = fs.readdirSync(LOG_FILES) || []
   const paymentLogFiles = res.filter(f => f.match(/_paymentHistory/))
-  const isRecent = t => Date.now() - +t < DAYS_FOR_STATS * 24 * 60 * 60 * 1000
+  const isRecent = t => Date.now() - t < DAYS_FOR_STATS * 24 * 60 * 60 * 1000
   console.boring(`${getDate()} ${getPaymentEvents.length} payment records found in db`)
   for (const fileName of paymentLogFiles) {
     const timestamp = fileName.split('_')[0]
@@ -31,6 +31,7 @@ const initialize = async () => {
     // for (const [i, hop] of Object.keys(r.hops).entries()) {
     for (let i = 0; i < r.hops.length; i++) {
       const hop = r.hops[i]
+      // removes direct outgoing and incoming channels
       if (i === 0 || i >= r.hops.length - 1) continue
       soFar[hop] = {
         count: (soFar[hop]?.count || 0) + 1,
