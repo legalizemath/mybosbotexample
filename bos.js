@@ -316,7 +316,7 @@ const send = async (
 
     // if someone JUST changed fee try again just 1 more time
     if (!retry && e[1] === 'FeeInsufficient') {
-      console.error(`\n${getDate()} retrying just once after FeeInsufficient error`)
+      console.boring(`\n${getDate()} retrying just once after FeeInsufficient error`)
       return await send(
         {
           destination,
@@ -372,6 +372,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // bos call getFeeRates - has base fee info (via channel or tx ids, not pubkeys)
 // bos call updateRoutingFees - MUST set every value or it is set to default (https://github.com/alexbosworth/ln-service#updateroutingfees)
 // bos call getForwards - forwarding events, choices: either {limit: 5} or {token: `{"offset":10,"limit":5}`}
+// bos call getpeers - contains networking data like bytes sent/received/socket
 // names for methods and choices for arguments via `bos call` or here
 // https://github.com/alexbosworth/ln-service
 // https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
@@ -391,11 +392,25 @@ const callAPI = async (method, choices = {}, log = false) => {
       logger: logger(log)
     })
   } catch (e) {
-    console.error(`${getDate()} bos.callAPI() aborted:`, e)
+    console.error(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, e)
     return undefined
   }
 }
 
+const find = async (query, log = false) => {
+  try {
+    log && console.boring(`${getDate()} bos.find('${query}')`)
+    return await lnd.findRecord({
+      lnd: await mylnd(),
+      query
+    })
+  } catch (e) {
+    console.error(`${getDate()} bos.find('${query}') aborted:`, e)
+    return null
+  }
+}
+
+// to get all peers including inactive just do bos.peers({ is_active: undefined })
 const peers = async (choices = {}, log = false) => {
   try {
     log && console.boring(`${getDate()} bos.peers()`)
@@ -422,7 +437,7 @@ const peers = async (choices = {}, log = false) => {
     return peers
   } catch (e) {
     console.error(`${getDate()} bos.peers() aborted:`, e)
-    return []
+    return null
   }
 }
 
@@ -514,9 +529,15 @@ const customGetForwardingEvents = async (
   let page = 0
 
   // need a table to convert short channel id's to public keys
-  const getChannels = await callAPI('getChannels', {}, log)
   const idToPublicKey = {}
+  // from existing channels
+  const getChannels = await callAPI('getChannels', {}, log)
   getChannels.channels.forEach(channel => {
+    idToPublicKey[channel.id] = channel.partner_public_key
+  })
+  // also from closed channels which wouldn't be part of getChannels
+  const getClosedChannels = await callAPI('getClosedChannels', {}, log)
+  getClosedChannels.channels.forEach(channel => {
     idToPublicKey[channel.id] = channel.partner_public_key
   })
 
@@ -783,14 +804,14 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
 // if by_channel_id is specified, looks at channel id keys  for specific settings
 // by_channel_id: {'702673x1331x1': {max_htlc_mtokens: '1000000000' }}
 const setPeerPolicy = async (
-  { peer_key, by_channel_id, base_fee_mtokens, fee_rate, cltv_delta, max_htlc_mtokens, min_htlc_mtokens },
+  { peer_key, by_channel_id, base_fee_mtokens, fee_rate, cltv_delta, max_htlc_mtokens, min_htlc_mtokens, my_key },
   log = false
 ) => {
   if (!peer_key) return 1
   let settings
   try {
     // get my public key
-    const me = (await callAPI('getIdentity')).public_key
+    const me = my_key ?? (await callAPI('getIdentity')).public_key
     if (!me) return 1
 
     // get channels for my node with this peer
@@ -825,10 +846,23 @@ const setPeerPolicy = async (
         min_htlc_mtokens: String(byId?.min_htlc_mtokens ?? min_htlc_mtokens ?? channel.local.min_htlc_mtokens),
         max_htlc_mtokens: String(max_htlc_msats)
       }
-      log && console.log('bos call updateRoutingFees', settings)
-      // const result =
-      await bos.callAPI('updateRoutingFees', settings)
-      // log && console.log({ result })
+
+      // check if nothing changed
+      const nothingChanged =
+        settings.transaction_id === channel.transaction_id &&
+        settings.transaction_vout === channel.transaction_vout &&
+        settings.base_fee_mtokens === channel.base_fee_mtokens &&
+        settings.fee_rate === channel.fee_rate &&
+        settings.cltv_delta === channel.cltv_delta &&
+        settings.min_htlc_mtokens === channel.min_htlc_mtokens &&
+        settings.max_htlc_mtokens === channel.max_htlc_mtokens
+
+      if (!nothingChanged) {
+        log && console.log(`${getDate()} bos call updateRoutingFees`, settings)
+        await bos.callAPI('updateRoutingFees', settings)
+      } else {
+        log && console.log(`${getDate()} no policy changes necessary`)
+      }
     }
 
     return 0
@@ -883,6 +917,7 @@ const bos = {
   customGetPaymentEvents,
   customGetReceivedEvents,
   getNodeChannels,
-  setPeerPolicy
+  setPeerPolicy,
+  find
 }
 export default bos
