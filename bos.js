@@ -525,7 +525,7 @@ const customGetForwardingEvents = async (
   const byPeer = {}
   const byTime = []
 
-  const pageSize = 1000
+  const pageSize = 5000
   let page = 0
 
   // need a table to convert short channel id's to public keys
@@ -630,7 +630,7 @@ const customGetPaymentEvents = async (
 
   const byTime = []
 
-  const pageSize = 1000
+  const pageSize = 5000
   let nextOffset
 
   const isTimedOut = () => {
@@ -722,7 +722,7 @@ const customGetReceivedEvents = async (
   const byTime = []
   const byId = {}
 
-  const pageSize = 1000
+  const pageSize = 5000
   let nextOffset
 
   const isTimedOut = () => {
