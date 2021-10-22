@@ -1,7 +1,6 @@
 // NOT SAFE TO RUN
 dfgdfgdfgdfgdfg
 
-/* eslint-disable no-unreachable */
 import fs from 'fs' // comes with nodejs, to read/write log files
 import dns from 'dns' // comes with nodejs, to check if there's internet access
 import bos from './bos.js' // my wrapper for bos, needs to be in same folder
