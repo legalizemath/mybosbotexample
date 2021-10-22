@@ -31,7 +31,7 @@ const MIN_REBALANCE_SATS = 51e3
 // smaller = can use smaller liquidity/channels for cheaper/easier rebalances
 // bos rebalance does probing + size up htlc strategy
 // (bos rebalance requires >50k)
-const MAX_REBALANCE_SATS = 212121 * 2
+const MAX_REBALANCE_SATS = 212121
 
 // rebalance with faster keysends after bos rebalance works
 // (faster but higher risk of stuck sats so I send less)
@@ -80,7 +80,7 @@ const MIN_PPM_ABSOLUTE = 0
 const MAX_PPM_ABSOLUTE = 2500
 
 // smallest amount of sats necessary to consider a side not drained
-const MIN_SATS_PER_SIDE = 1000e3
+const MIN_SATS_PER_SIDE = 1e6
 
 // max minutes to spend per rebalance try
 const MINUTES_FOR_REBALANCE = 5
@@ -830,7 +830,7 @@ const updateFees = async () => {
     const by_channel_id = sizeMaxHTLC(peer)
     const byChannelPretty = Object.values(by_channel_id)
       .map(v => pretty(v.max_htlc_mtokens / 1000))
-      .join(', ')
+      .join('|')
 
     console.boring(
       `${getDate()} ${ca(peer.alias).padEnd(30)} < ${pretty(MIN_CHAN_SIZE)} ` +
@@ -940,13 +940,13 @@ const updateFees = async () => {
     const warnings = isVeryRemoteHeavy(peer) ? '💤-VRH' : ''
 
     // get the rest of channel policies figured out
-    const localSats = ((peer.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(5)
-    const remoteSats = ((peer.inbound_liquidity / 1e6).toFixed(1) + 'M').padEnd(5)
+    const localSats = ((peer.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(6)
+    const remoteSats = ((peer.inbound_liquidity / 1e6).toFixed(1) + 'M').padEnd(6)
     // max htlc sizes for this peers channels
     const by_channel_id = sizeMaxHTLC(peer)
     const byChannelPretty = Object.values(by_channel_id)
       .map(v => pretty(v.max_htlc_mtokens / 1000))
-      .join(', ')
+      .join('|')
 
     const outflowString = outflow ? `${pretty(outflow).padStart(10)} sats/day` : ''
     const ppmNewString = ('(' + ppmNew.toFixed(3)).padStart(10) + ')'
@@ -1622,7 +1622,8 @@ const generateSnapshots = async () => {
     const lastPpmChangeMinutes = lastPpmChange && ((Date.now() - (lastPpmChange.t || 0)) / (1000 * 60)).toFixed(0)
     const lastPpmChangeString =
       lastPpmChange && lastPpmChange.ppm_old
-        ? `last ∆ppm: ${lastPpmChange.ppm_old}->${lastPpmChange.ppm}ppm @ ${lastPpmChangeMinutes} minutes ago`
+        ? `last ∆ppm: ${lastPpmChange.ppm_old}->${lastPpmChange.ppm}ppm @ ` +
+          `${(lastPpmChangeMinutes / 60 / 24).toFixed(1)} days ago`
         : ''
 
     const lastRoutedIn = (Date.now() - p.routed_in_last_at) / (1000 * 60 * 60 * 24)
