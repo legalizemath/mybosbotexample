@@ -1,5 +1,6 @@
 // runs with: node lndsummary
-// just the generate summary snapshots part of my script that just reads lnd data
+// needs bos.js wrapper and package.json (so it knows its modules) in same folder
+// just the generate summary snapshots part of my script that just reads lnd data and makes summary text files
 
 import fs from 'fs' // comes with nodejs, to read/write log files
 import bos from './bos.js' // my wrapper for bos, needs to be in same folder
