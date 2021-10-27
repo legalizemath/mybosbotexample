@@ -9,8 +9,7 @@ const { max, floor, abs, ceil, trunc } = Math
 // change this to change number of days summary is for
 const DAYS_FOR_STATS = 7
 
-const MIN_CHAN_SIZE = 2000000
-
+// where to put random tables
 const LOG_FILES = './logs'
 const PEERS_LOG_PATH = './peers'
 const SNAPSHOTS_PATH = './snapshots'
@@ -32,7 +31,7 @@ const generateSnapshots = async () => {
   }
 
   const mynode = {}
-  mynode.my_public_key = await bos.callAPI('getIdentity')
+  mynode.my_public_key = (await bos.callAPI('getIdentity')).public_key
 
   // on-chain channel info switched to object with keys of channel "id" ("partner_public_key" inside)
   // bos treats peers like every channel is combined but can have multiple channels w/ diff id w/ same peer
@@ -563,7 +562,6 @@ const generateSnapshots = async () => {
     // warning if fee is lower than needed for rebalancing on remote heavy channel with no flow in
     if (
       p.outbound_liquidity < 1e6 &&
-      p.capacity > MIN_CHAN_SIZE &&
       p.routed_in_msats === 0 &&
       rebalanceSuggestionHistory.o.median &&
       rebalanceSuggestionHistory.o.bottom25 > p.fee_rate
@@ -761,5 +759,3 @@ const fixJSON = (k, v) => (v === undefined ? null : v)
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
 generateSnapshots()
-
-
