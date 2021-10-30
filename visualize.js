@@ -9,7 +9,8 @@
 // ppm, routed, earned will be plotted in log scale, days in linear
 // roundDown=1 will round down to nearest sat as a way to remove sub-satoshi base fees
 // e.g.
-// http://192.168.1.247:7890/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=earned&rAxis=&out=&from=&roundDown=1&type=bubble
+// http://192.168.1.123:7890/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=earned&rAxis=routed&any=bfx&out=&from=&roundDown=&type=bubble
+// http://192.168.1.123:7890/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=earned&rAxis=&out=&from=&roundDown=1&type=bubble
 // http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned
 // http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&xGroups=10
 // http://192.168.1.123:7890/?daysForStats=14&xAxis=ppm&yAxis=earned&out=aci
@@ -52,6 +53,7 @@ const generatePage = async ({
   out = '', // partial alias or public key match
   from = '', // partial alias or public key match
   type = 'bubble', // can also be line
+  any = '', // can be from or out of
   roundDown = '' // 1 or ''/0 ignore milisats (helps w/ removing <1 sat base fee)
 }) => {
   // ensure integers where necessary
@@ -66,7 +68,7 @@ const generatePage = async ({
 
   let peerForwards = []
   const pubkeyToAlias = {}
-  let peerOut, peerIn
+  let peerOut, peerIn, peerAny
 
   const peers = await bos.peers({ is_active: undefined })
 
@@ -79,8 +81,10 @@ const generatePage = async ({
     timeArray: true
   })
 
+  peerForwards = peersForwards
+
   // specific peer or all
-  if (out || from) {
+  if (out || from || any) {
     // if specific peer try to find alias data
     if (out) {
       peerOut =
@@ -110,30 +114,51 @@ const generatePage = async ({
       peerIn = peerIn ?? { alias: 'unknown', public_key: '', id: from }
     }
 
-    peerOut && console.log({ peerOut })
-    peerIn && console.log({ peerIn })
+    if (any) {
+      peerAny =
+        peers.find(p => p.public_key.includes(any.toLowerCase())) ||
+        peers.find(p => p.alias.toLowerCase() === any.toLowerCase()) ||
+        peers.find(p => p.alias.toLowerCase().includes(any.toLowerCase()))
+      // if node still exists this will find alias and public key
+      if (!peerAny) {
+        peerAny = (await bos.find(any))?.nodes?.[0]
+        if (peerAny) pubkeyToAlias[peerAny.public_key] = peerAny.alias
+      }
+      // if not doesn't still exist, would have to just match channel id
+      peerAny = peerAny ?? { alias: 'unknown', public_key: '', id: any }
+    }
+
+    // peerOut && console.log({ peerOut })
+    // peerIn && console.log({ peerIn })
+    // peerAny && console.log({ peerAny })
 
     console.log('original number of forwards for all peers:', peersForwards.length)
 
     if (out) {
-      peerForwards = peersForwards.filter(p =>
-        out ? p.outgoing_peer === peerOut.public_key || p.outgoing_channel === peerOut.id : true
+      peerForwards = peerForwards.filter(
+        p => p.outgoing_peer === peerOut.public_key || p.outgoing_channel === peerOut.id
       )
       console.log('after filtering for out-peer:', peerForwards.length)
     }
     if (from) {
-      peerForwards = peerForwards.filter(p =>
-        from ? p.incoming_peer === peerIn.public_key || p.incoming_channel === peerIn.id : true
-      )
+      peerForwards = peerForwards.filter(p => p.incoming_peer === peerIn.public_key || p.incoming_channel === peerIn.id)
       console.log('after filtering for from-peer:', peerForwards.length)
     }
-  } else {
-    // if every peer
-    peerForwards = peersForwards
+    if (any) {
+      peerForwards = peerForwards.filter(
+        p =>
+          p.incoming_peer === peerAny.public_key ||
+          p.incoming_channel === peerAny.id ||
+          p.outgoing_peer === peerAny.public_key ||
+          p.outgoing_channel === peerAny.id
+      )
+      console.log('after filtering for any mention of a peer:', peerForwards.length)
+    }
   }
 
   // console.log(peerForwards[0])
-  console.log('loaded forwards, n:', peerForwards.length, out)
+  console.log(JSON.stringify({ peerOut, peerIn, peerAny }))
+  console.log('peerForwards n:', peerForwards.length)
 
   // console.log(Object.keys(peersForwards).length)
 
@@ -248,10 +273,21 @@ const generatePage = async ({
   const [, xMaxPlot] = getMinMax(dataForPlot.map(d => d.x))
   const [, yMaxPlot] = getMinMax(dataForPlot.map(d => d.y))
 
-  const dataString1 = JSON.stringify(dataForPlot)
+  const color1 = 'rgb(255, 99, 132)'
+  const color2 = 'rgb(99, 132, 255)'
+
+  const dataForPlot1 = any ? dataForPlot.filter(v => v.from.includes(peerAny?.alias)) : dataForPlot
+  const dataString1 = JSON.stringify(dataForPlot1)
+
+  const dataForPlot2 = any ? dataForPlot.filter(v => v.to.includes(peerAny?.alias)) : []
+  const dataString2 = JSON.stringify(dataForPlot2)
+
+  // const colorData = dataForPlot.map(v => color1)
 
   const outOf = out ? 'out to ' + peerOut?.alias : ''
   const inFrom = from ? 'in from ' + peerIn?.alias : ''
+  const anyUse = any ? 'with ' + peerAny?.alias : ''
+  const whichPeers = anyUse || `${outOf}${outOf && inFrom ? ', ' : ''}${inFrom}`
 
   // annoys me can't see max axis label on some log axis
   const logMaxX = isLogX ? pow(10, ceil(log10(xMaxPlot))) : null
@@ -289,7 +325,7 @@ const generatePage = async ({
 </head>
 <body>
 
-  <div id="title">Peer forwards for past ${daysForStats} days<br>${outOf}${outOf && inFrom ? ', ' : ''}${inFrom}</div>
+  <div id="title">Peer forwards for past ${daysForStats} days<br>${whichPeers}</div>
   <div class="chart-container" style="position: relative; height: 80vh; width: 80vw; margin: 3vh auto;">
   <canvas id="chart" width="400" height="400"></canvas>
   </div>
@@ -348,18 +384,34 @@ const generatePage = async ({
 
   const labelRadius = '${rAxis && type === 'bubble' ? 'area ∝ ' + rAxis + ', ' : ' '}'
   const labelGroups = '${xGroups ? `grouped into ${xGroups} x-axis regions, ` : ' '}'
-  const labelCount = 'forwards count: ${peerForwards.length}'
-  const data = {
-    datasets: [
-      {
-        label: (labelRadius + labelGroups + labelCount).trim(),
-        pointHoverRadius: 3,
-        data: ${dataString1},
-        backgroundColor: 'rgb(255, 99, 132)',
-        yAxisID: 'y'
-      }
-    ]
+  const labelCountFrom = 'count: ${dataForPlot1.length}'
+  const labelCountOut = 'count: ${dataForPlot2.length}'
+  const labelAnyFrom = '${any ? 'incoming, ' : ''}'
+  const labelAnyOut = '${any ? 'outgoing, ' : ''}'
+
+  const any = '${any}'
+
+  const dataset1 = {
+    label: (labelAnyFrom + labelRadius + labelGroups + labelCountFrom).trim(),
+    pointHoverRadius: 3,
+    data: ${dataString1},
+    backgroundColor: '${color1}',
+    yAxisID: 'y'
   }
+
+  const dataset2 = {
+    parsing: ${any ? 'true' : 'false'},
+    label: (labelAnyOut + labelRadius + labelGroups + labelCountOut).trim(),
+    pointHoverRadius: 3,
+    data: ${dataString2},
+    backgroundColor: '${color2}',
+    yAxisID: 'y'
+  }
+
+  const data = {
+    datasets: any ? [ dataset1, dataset2 ] : [dataset1]
+  }
+
   new Chart('chart', {
     type: '${type}',
     options,
@@ -404,7 +456,7 @@ if (networkLocation === 'localhost') {
       // redirect to page with querry items written out for easier editing
       console.log('redirecting')
       res.writeHead(302, {
-        Location: '/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=earned&rAxis=&out=&from=&roundDown=&type=bubble'
+        Location: '/?daysForStats=7&xGroups=0&xAxis=ppm&yAxis=earned&rAxis=&any=&out=&from=&roundDown=&type=bubble'
       })
       res.end()
     } else {
