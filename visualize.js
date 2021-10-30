@@ -276,10 +276,10 @@ const generatePage = async ({
   const color1 = 'rgb(255, 99, 132)'
   const color2 = 'rgb(99, 132, 255)'
 
-  const dataForPlot1 = any ? dataForPlot.filter(v => v.from.includes(peerAny?.alias)) : dataForPlot
+  const dataForPlot1 = any && !xGroups ? dataForPlot.filter(v => v.from.includes(peerAny?.alias)) : dataForPlot
   const dataString1 = JSON.stringify(dataForPlot1)
 
-  const dataForPlot2 = any ? dataForPlot.filter(v => v.to.includes(peerAny?.alias)) : []
+  const dataForPlot2 = any && !xGroups ? dataForPlot.filter(v => v.to.includes(peerAny?.alias)) : []
   const dataString2 = JSON.stringify(dataForPlot2)
 
   // const colorData = dataForPlot.map(v => color1)
@@ -386,10 +386,10 @@ const generatePage = async ({
   const labelGroups = '${xGroups ? `grouped into ${xGroups} x-axis regions, ` : ' '}'
   const labelCountFrom = 'count: ${dataForPlot1.length}'
   const labelCountOut = 'count: ${dataForPlot2.length}'
-  const labelAnyFrom = '${any ? 'incoming, ' : ''}'
-  const labelAnyOut = '${any ? 'outgoing, ' : ''}'
+  const labelAnyFrom = '${any && !xGroups ? 'incoming, ' : ''}'
+  const labelAnyOut = '${any && !xGroups ? 'outgoing, ' : ''}'
 
-  const any = '${any}'
+  const showBoth = ${any && !xGroups ? 'true' : 'false'}
 
   const dataset1 = {
     label: (labelAnyFrom + labelRadius + labelGroups + labelCountFrom).trim(),
@@ -400,7 +400,6 @@ const generatePage = async ({
   }
 
   const dataset2 = {
-    parsing: ${any ? 'true' : 'false'},
     label: (labelAnyOut + labelRadius + labelGroups + labelCountOut).trim(),
     pointHoverRadius: 3,
     data: ${dataString2},
@@ -409,7 +408,7 @@ const generatePage = async ({
   }
 
   const data = {
-    datasets: any ? [ dataset1, dataset2 ] : [dataset1]
+    datasets: showBoth ? [ dataset1, dataset2 ] : [dataset1]
   }
 
   new Chart('chart', {
