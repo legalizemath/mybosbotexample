@@ -5,7 +5,7 @@ const { log10, floor } = Math
 
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 
-const updatePendingStateTimer = 10 * 1000 // update pending counts every _ ms
+const updatePendingStateTimer = 5 * 1000 // update pending counts every _ ms
 const maxPerGroup = 2 // max htlc per order of magnitude
 const byChannel = {}
 let totalCount = 0
@@ -15,14 +15,20 @@ const initialize = async () => {
   const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
   subForwardRequests.on('forward_request', f => {
     const group = getGroup(f.tokens)
-    const inputChannelOk = (byChannel[f.in_channel]?.[group] ?? 0) < maxPerGroup
-    const outputChannelOk = (byChannel[f.out_channel]?.[group] ?? 0) < maxPerGroup
-    const ok = inputChannelOk && outputChannelOk
-    if (ok) f.accept()
-    else f.reject()
+    const inputChannelN = byChannel[f.in_channel]?.[group] ?? 0
+    const outputChannelN = byChannel[f.out_channel]?.[group] ?? 0
+    const ok = inputChannelN < maxPerGroup && outputChannelN < maxPerGroup
+    if (ok) {
+      byChannel[f.in_channel][group] = inputChannelN + 1
+      byChannel[f.out_channel][group] = outputChannelN + 1
+      f.accept()
+    } else {
+      f.reject()
+    }
     say(f, ok)
   })
   updatePendingCounts()
+  mention(`${getDate()} htlcLimiter() initiated`)
 }
 
 const updatePendingCounts = async () => {
@@ -43,15 +49,20 @@ const updatePendingCounts = async () => {
 // get order of magnitude for routed amount
 const getGroup = v => floor(log10(v))
 const say = (f, isAccepted) =>
-  console.log(
-    isAccepted ? 'htlc accepted' : 'htlc rejected',
-    f.in_channel,
-    JSON.stringify(byChannel[f.in_channel]),
+  mention(
+    `${getDate()}`,
+    isAccepted ? 'accepted new htlc' : 'rejected new htlc',
+    `1e${getGroup(f.tokens)}`.padStart(4),
+    f.in_channel.padStart(15),
     '->',
-    f.out_channel,
-    JSON.stringify(byChannel[f.out_channel]),
-    totalCount
+    f.out_channel.padEnd(15),
+    `in flight total: ${totalCount}, in & out:`,
+    JSON.stringify(byChannel[f.in_channel]),
+    JSON.stringify(byChannel[f.out_channel])
   )
 const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
+const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
+const mention = (...args) => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`)
 
-initialize()
+initialize() // to run here
+// export default initialize // to run elsewhere
