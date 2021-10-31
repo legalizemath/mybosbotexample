@@ -5,12 +5,12 @@ const { log10, floor } = Math
 
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 
-const updatePendingStateTimer = 5 * 1000 // update pending counts every _ ms
+const updatePendingStateTimer = 10 * 1000 // update pending counts every _ ms
 const maxPerGroup = 2 // max htlc per order of magnitude
 const byChannel = {}
 let totalCount = 0
 
-const initialize = async () => {
+const initialize = async ({ showLogs = false } = {}) => {
   const authed = await mylnd()
   const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
   subForwardRequests.on('forward_request', f => {
@@ -25,7 +25,7 @@ const initialize = async () => {
     } else {
       f.reject()
     }
-    say(f, ok)
+    showLogs && say(f, ok)
   })
   updatePendingCounts()
   mention(`${getDate()} htlcLimiter() initiated`)
@@ -64,5 +64,5 @@ const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 const mention = (...args) => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`)
 
-initialize() // to run here
-// export default initialize // to run elsewhere
+export default initialize
+// initialize()
