@@ -2,151 +2,73 @@
 // "scripts": {
 //   "start": "npm link balanceofsatoshis && node index.js",
 //   "start-all": "sudo -b node resetHandler > /dev/null 2>&1 && sudo -k && npm run start",
+//   "start-all-log": "sudo -b node resetHandler >resetLogs.txt 2>&1 && sudo -k && npm run start"
+// },
 
 import { spawn } from 'child_process'
 import fs from 'fs'
 
-const RESET_ACTION_PATH = 'resetDone.json'
-const RESET_REQUEST_PATH = 'resetRequest.json'
-const LOOP_TIME_MS = 15 * 1000
-const MINUTES_FOR_SHELL_TIMEOUT = 15
+const RESET_RESULT_PATH = 'resetDone.json' // file has info on last job done
+const RESET_REQUEST_PATH = 'resetRequest.json' // create this file to start reset
+const RESET_HANDLER_ID_PATH = 'resetID.json' // just 1 should run
+const RESET_STOP_PATH = 'resetStop.json' // if exists, all processes terminate
+const LOOP_TIME_MS = 15 * 1000 // how often to check for request
+const MINUTES_FOR_SHELL_TIMEOUT = 20 // minutes before shell process terminates
 
 // handle resetting services by running the following
-// const COMMAND_TO_RUN = 'sudo ls -a'
 const COMMAND_TO_RUN = 'sudo /home/me/Umbrel/scripts/stop && sleep 10 && sudo /home/me/Umbrel/scripts/start'
 
-// run in background with "sudo -b node resetHandler > /dev/null 2>&1 && sudo -k"
-// or in different terminal with "sudo node resetHandler > /dev/null 2>&1 && sudo -k"
-
-// whenever RESET_REQUEST_PATH file appears with '{ "id': <integer> }
-// where id is integer like ms timestamp that's higher than the one in RESET_ACTION_PATH
-// can run in separate terminal "sudo node resetHandler"
-// or to output printouts to file "sudo -b node resetHandler >resetLogs.txt 2>&1 && sudo -k"
-// sudo -b lets you put in sudo pass while & at end would not
-// sudo priveleges can be granted to just this command and not entire node script
-
+// id = timestamp at initialization
 // avoid duplicate handlers
 // older handler seeing new handler exists
-const idHandler = Date.now()
+const id = Date.now()
+console.log(`${id} resetHandler() starting`)
 
+// run the check in a loop
 const triggerCheckLoop = async () => {
-  // check
   await runCheck()
-
-  // sleep
   await new Promise(resolve => setTimeout(resolve, LOOP_TIME_MS))
-
-  // relaunch loop again
   triggerCheckLoop()
 }
 
+// checks if reset needed
 const runCheck = async () => {
   const now = Date.now()
   const nowISO = new Date(now).toISOString()
 
-  // check for last reset, default 0
-  let lastReset = 0
-  try {
-    const file = JSON.parse(fs.readFileSync(RESET_ACTION_PATH))
-    lastReset = file.id || lastReset
-    if (file.idHandler && idHandler < file.idHandler) process.exit(0)
-    if (file.idHandler !== idHandler) {
-      fs.writeFileSync(
-        RESET_ACTION_PATH,
-        JSON.stringify(
-          {
-            ...file,
-            idHandler
-          },
-          null,
-          2
-        )
-      )
-    }
-  } catch (e) {
-    console.log(`${nowISO} ${idHandler} no last reset action found`)
-    fs.writeFileSync(
-      RESET_ACTION_PATH,
-      JSON.stringify(
-        {
-          id: 0,
-          idHandler
-        },
-        null,
-        2
-      )
-    )
-  }
-
-  // check for last reset request, default 0
-  let lastRequest = 0
-  try {
-    lastRequest = JSON.parse(fs.readFileSync(RESET_REQUEST_PATH)).id
-  } catch (e) {
-    console.log(
-      `${nowISO} ${idHandler} no ${RESET_REQUEST_PATH} found, e.g.: echo {\\"id\\": ${lastReset}} > ${RESET_REQUEST_PATH}`
-    )
-  }
-
-  // terminate process signal is -1 (just for testing)
-  if (lastRequest === -1) {
-    console.log(`${nowISO} ${idHandler} request -1 terminate signal found`)
-    // get rid of termination request
-    fs.unlinkSync(RESET_REQUEST_PATH)
-    // update action file
-    fs.writeFileSync(
-      RESET_ACTION_PATH,
-      JSON.stringify(
-        {
-          // no change to last reset time
-          id: lastReset,
-          ranAt: now,
-          ranAtISO: nowISO,
-          idHandler,
-          terminated: true
-        },
-        null,
-        2
-      )
-    )
-    // exit script
+  // check if stop file exists
+  if (fs.existsSync(RESET_STOP_PATH)) {
+    console.log(`${nowISO} ${RESET_STOP_PATH} file observed, terminating`)
     process.exit(0)
   }
 
-  console.log(`${nowISO} ${idHandler} lastRequest: ${lastRequest} | lastReset: ${lastReset}`)
+  // make sure this is the oldest process
+  try {
+    const idFile = JSON.parse(fs.readFileSync(RESET_HANDLER_ID_PATH))
+    // if this process is older than one in file, terminate to avoid doubles
+    if (idFile.id && id < idFile.id) {
+      console.log(`${nowISO} ${RESET_HANDLER_ID_PATH} file has newer id, terminating`)
+      process.exit(0)
+    }
+  } catch (e) {}
+  // write surviving id to file
+  fs.writeFileSync(RESET_HANDLER_ID_PATH, JSON.stringify({ id }))
 
-  // if there's no new requests
-  if (lastReset >= lastRequest) {
-    // request file is outdated if exists, get rid of it
-    if (fs.existsSync(RESET_REQUEST_PATH)) fs.unlinkSync(RESET_REQUEST_PATH)
-    // this attempt done
-    return 1
-  }
+  // check if requests to reset node exists
+  const requestFound = fs.existsSync(RESET_REQUEST_PATH)
+
   // new request so take action
-  const res = await runShellCommand(COMMAND_TO_RUN, { log: true })
-  console.log(res)
+  if (requestFound) {
+    console.log(`${nowISO} request file found ${RESET_REQUEST_PATH}`)
+    const res = await runShellCommand(COMMAND_TO_RUN, { log: true })
+    // record result
+    fs.writeFileSync(RESET_RESULT_PATH, JSON.stringify({ id, now, nowISO, res }, null, 2))
+    console.log(`${nowISO} job done by ${id}`, res)
 
-  // record execution time
-  fs.writeFileSync(
-    RESET_ACTION_PATH,
-    JSON.stringify(
-      {
-        // update for this reset
-        id: lastRequest,
-        ranAt: now,
-        ranAtISO: nowISO,
-        idHandler,
-        res
-      },
-      null,
-      2
-    )
-  )
-  // get rid of request
-  fs.unlinkSync(RESET_REQUEST_PATH)
-  console.log(`${nowISO} ${idHandler} files updated`)
-
-  return 0
+    // get rid of request
+    fs.unlinkSync(RESET_REQUEST_PATH)
+    console.log(`${nowISO} request removed by ${id}`)
+  }
 }
 
 // handles shell commands
