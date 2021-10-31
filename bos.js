@@ -29,7 +29,7 @@ import {
   getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
 
-const { trunc, min, ceil } = Math
+const { trunc, min, ceil, random } = Math
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
@@ -156,7 +156,7 @@ const rebalance = async (
       max_rebalance: String(trunc(maxSats)), // sats
       timeout_minutes: trunc(maxMinutes), // minutes
       max_fee_rate: trunc(maxFeeRate), // max fee rate
-      max_fee: trunc(maxSats * 0.01),
+      max_fee: trunc(maxSats * 0.05), // 5% just in case
       avoid,
       // out_channels: [],
       // in_outound: undefined,
@@ -196,7 +196,7 @@ const rebalance = async (
     log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
 
     // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
-    if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout' && avoid.length <= 1) {
+    if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
       retryAvoidsOnTimeout-- // 1 less retry left now
       const oldAvoidPpm = +(avoid[0] || '').match(/FEE_RATE<(.+?)\//)?.[1] || 0
       // each new retry moves avoid fee rate 25% closer to half max total fee rate
@@ -205,7 +205,7 @@ const rebalance = async (
 
       // log?.details &&
       console.boring(
-        `${getDate()} Retrying after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
+        `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
           ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
       )
 
@@ -249,10 +249,12 @@ const send = async (
     maxFee = undefined, // max fee sats, 1 sat fee per 1 sat arriving somewhere is default max
     message = undefined, // string to send (reveals sender when used)
     // retryAvoidsOnTimeout = 0
-    isRebalance = true
+    avoid = [],
+    isRebalance = true, // double checks in/out peers specified to avoid using same for both
+    retryAvoidsOnTimeout = 0
   },
   log = { details: false, progress: true },
-  retry = false
+  isRetry = false
 ) => {
   try {
     const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
@@ -282,7 +284,7 @@ const send = async (
       lnd: await mylnd(),
       logger: logger(log),
       fs: { getFile: readFile }, // required
-      avoid: [], // required
+      avoid, // required
       is_dry_run: false, // required
       quiz_answers: [], // required
       request,
@@ -315,8 +317,8 @@ const send = async (
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
 
     // if someone JUST changed fee try again just 1 more time
-    if (!retry && e[1] === 'FeeInsufficient') {
-      console.boring(`\n${getDate()} retrying just once after FeeInsufficient error`)
+    if (!isRetry && e[1] === 'FeeInsufficient') {
+      console.boring(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
       return await send(
         {
           destination,
@@ -324,12 +326,61 @@ const send = async (
           toChannel,
           sats,
           maxMinutes,
-          maxFeeRate
+          maxFeeRate,
+          maxFee,
+          message,
+          avoid,
+          isRebalance,
+          retryAvoidsOnTimeout
         },
         log,
         true // mark it as a retry
       )
     }
+
+    // handle timeout retries if used, increment avoid filter each time
+    // towards half of max fee rate
+    if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
+      // removed && avoid.length <= 1
+      retryAvoidsOnTimeout-- // 1 less retry left now
+      const oldAvoidPpm = +(avoid[0] || '').match(/FEE_RATE<(.+?)\//)?.[1] || 0
+      // each new retry moves avoid fee rate 25% closer to half max total fee rate
+      const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
+      const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
+      console.boring(
+        `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
+          ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
+      )
+      // for simplicity will always overwrite or create first item in avoid array
+      if ((avoid[0] || '').includes('FEE_RATE<')) avoid[0] = newAvoid
+      else avoid.unshift(newAvoid)
+      // continue as retry
+      return await send(
+        {
+          destination,
+          fromChannel,
+          toChannel,
+          sats,
+          maxMinutes,
+          maxFeeRate,
+          maxFee,
+          message,
+          avoid,
+          isRebalance,
+          retryAvoidsOnTimeout
+        },
+        log,
+        isRetry
+      )
+    }
+
+    // sometimes reputations get ruined by broken nodes, helps to reset those rarely
+    if (e[1] === 'UnexpectedSendPaymentFailure') {
+      // 1% chance, every 100 on avg
+      if (random() < 0.01) await callAPI('deleteforwardingreputations')
+    }
+
+    // failed
     const suggestedFeeRate = e[1] === 'MaxFeeLimitTooLow' ? ceil(((1.0 * +e[2].needed_fee) / sats) * 1e6) : null
     return {
       failed: true,
