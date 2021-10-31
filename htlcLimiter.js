@@ -5,12 +5,13 @@ const { log10, floor } = Math
 
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 
-const updatePendingStateTimer = 10 * 1000 // update pending counts every _ ms
+const updatePendingStateTimer = 10 * 1000 // update pending counts every _ ms, also effectively rate limiter
+const checkNodeWorkingTimer = 42 * 1000 // how often to try lnd until works
 const maxPerGroup = 2 // max htlc per order of magnitude
 const byChannel = {}
 let totalCount = 0
 
-const initialize = async ({ showLogs = false } = {}) => {
+const initialize = async ({ showLogs = true } = {}) => {
   const authed = await mylnd()
   const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
   subForwardRequests.on('forward_request', f => {
@@ -27,12 +28,27 @@ const initialize = async ({ showLogs = false } = {}) => {
     }
     showLogs && say(f, ok)
   })
-  updatePendingCounts()
-  mention(`${getDate()} htlcLimiter() initiated`)
+  updatePendingCounts({ subForwardRequests, showLogs })
+  mention(`${getDate()} htlcLimiter() initialized`)
 }
 
-const updatePendingCounts = async () => {
-  const channels = (await bos.callAPI('getChannels'))?.channels || []
+const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
+  let res = await bos.callAPI('getChannels')
+  // if lnd issue, keep trying until fixed and then reinitialize
+  while (!res) {
+    showLogs && mention(`${getDate()} htlcLimiter() lnd appears unavailable, retrying in ${checkNodeWorkingTimer}ms`)
+    await sleep(checkNodeWorkingTimer)
+    res = await bos.callAPI('getChannels')
+    if (res) {
+      // fixed, so stop previous listener
+      subForwardRequests.removeAllListeners()
+      // start new ones
+      initialize({ showLogs })
+      // this update loop will be replaced
+      return null
+    }
+  }
+  const channels = res?.channels || []
   totalCount = 0
   for (const channel of channels) {
     byChannel[channel.id] = {}
@@ -43,7 +59,7 @@ const updatePendingCounts = async () => {
     }
   }
   await sleep(updatePendingStateTimer)
-  updatePendingCounts()
+  updatePendingCounts({ subForwardRequests, showLogs })
 }
 
 // get order of magnitude for routed amount
@@ -64,5 +80,5 @@ const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 const mention = (...args) => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`)
 
-export default initialize
-// initialize()
+// export default initialize // uncomment this to import
+initialize() // uncomment this to run from terminal
