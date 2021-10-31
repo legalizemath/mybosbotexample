@@ -29,7 +29,7 @@ const getFee = f => {
 // return max number of htlcs allowed for each size range
 const maxForGroup = group => {
   if (group <= 1) return 2
-  return group + 1
+  return group * 2
 }
 
 let pendingPaymentCount = 0
