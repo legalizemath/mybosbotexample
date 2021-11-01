@@ -67,8 +67,8 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
     showLogs && mention(`${getDate()} htlcLimiter() lnd unavailable, retrying in ${LND_CHECK_DELAY} ms`)
     await sleep(LND_CHECK_DELAY)
     res = await bos.callAPI('getChannels')
-    if (res?.some(c => c.is_active)) {
-      // fixed, so stop previous listener
+    if (res?.channels?.some(c => c.is_active)) {
+      // at least one channel active so fixed, stop previous listener
       subForwardRequests.removeAllListeners()
       // start new ones
       initialize({ showLogs })
