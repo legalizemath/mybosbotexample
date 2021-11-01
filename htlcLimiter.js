@@ -30,6 +30,9 @@ const MIN_ORDER_OF_MAGNITUDE = 0 // lowest group possible
 
 const byChannel = {}
 const node = { policies: {} }
+let pendingPaymentCount = 0
+let pendingForwardCount = 0
+let lastPolicyCheck = 0
 
 // get order of magnitude group number from sats
 // pow of 2 better for fees which have smaller range than good for pow of 10
@@ -44,6 +47,20 @@ const getFee = f => {
     return fee_rate * 1e-6 * f.tokens + base_fee
   }
   return 0
+}
+
+// starts everything
+const initialize = async ({ showLogs = true } = {}) => {
+  const authed = await mylnd()
+  const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
+
+  subForwardRequests.on('forward_request', f => {
+    const allowed = decideOnForward({ f })
+    showLogs && say(f, allowed)
+  })
+
+  updatePendingCounts({ subForwardRequests, showLogs })
+  mention(`${getDate()} htlcLimiter() initialized`)
 }
 
 // decide to allow or block forward request
@@ -61,6 +78,8 @@ const decideOnForward = ({ f }) => {
 
   if (allowed) {
     f.accept()
+    if (!byChannel[f.in_channel]) byChannel[f.in_channel] = {}
+    if (!byChannel[f.out_channel]) byChannel[f.out_channel] = {}
     byChannel[f.in_channel][group] = inboundPending + 1
     byChannel[f.out_channel][group] = outboundPending + 1
     pendingForwardCount += 2
@@ -69,23 +88,6 @@ const decideOnForward = ({ f }) => {
   }
 
   return allowed
-}
-
-let pendingPaymentCount = 0
-let pendingForwardCount = 0
-let lastPolicyCheck = 0
-
-const initialize = async ({ showLogs = true } = {}) => {
-  const authed = await mylnd()
-  const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
-
-  subForwardRequests.on('forward_request', f => {
-    const allowed = decideOnForward({ f })
-    showLogs && say(f, allowed)
-  })
-
-  updatePendingCounts({ subForwardRequests, showLogs })
-  mention(`${getDate()} htlcLimiter() initialized`)
 }
 
 const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
