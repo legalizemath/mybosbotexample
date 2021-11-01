@@ -12,6 +12,8 @@ If # of htlcs for incoming channel is below some number (e.g. 2)
 and if # of htlcs for outgoing channel is below some number (e.g. 4)
 it grants the request, otherwise rejects
 
+The rate of getChannels updates is rate at which granted request counts are cleared, so also acts as rate limiter.
+
 */
 
 import { subscribeToForwardRequests } from 'balanceofsatoshis/node_modules/ln-service/index.js'
