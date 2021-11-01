@@ -1,7 +1,23 @@
+/*
+
+Limits # of htlcs in each channel
+
+Script periodically checks pending htlcs in channels and fee policy in channels.
+
+In parallel in watches for forwarding requests.
+It gets fee from either forwarding request or getChannels response & calculates it via policies.
+It then gets which power of 2 range fee is.
+It looks at how many pending htlcs are already in this fee range in request's incoming & outgoing channels
+If # of htlcs for incoming channel is below some number (e.g. 2)
+and if # of htlcs for outgoing channel is below some number (e.g. 4)
+it grants the request, otherwise rejects
+
+*/
+
 import { subscribeToForwardRequests } from 'balanceofsatoshis/node_modules/ln-service/index.js'
 import lnd from 'balanceofsatoshis/lnd/index.js'
 import bos from './bos.js'
-const { log10, floor, max } = Math
+const { log2, floor, max } = Math
 
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 
@@ -14,7 +30,9 @@ const byChannel = {}
 const node = { policies: {} }
 
 // get order of magnitude group number from sats
-const getGroup = s => max(floor(log10(s)), MIN_ORDER_OF_MAGNITUDE)
+// pow of 2 better for fees which have smaller range than good for pow of 10
+const getGroup = s => max(floor(log2(s)), MIN_ORDER_OF_MAGNITUDE)
+
 const getSats = f => f.tokens // get sats routed
 const getFee = f => {
   if (f.fee_mtokens !== undefined) return (+f.fee_mtokens || 0) / 1000
@@ -26,10 +44,29 @@ const getFee = f => {
   return 0
 }
 
-// return max number of htlcs allowed for each size range
-const maxForGroup = group => {
-  if (group <= 1) return 2
-  return group * 2
+// decide to allow or block forward request
+const decideOnForward = ({ f }) => {
+  const group = getGroup(getFee(f))
+
+  const inboundPending = byChannel[f.in_channel]?.[group] ?? 0
+  const outboundPending = byChannel[f.out_channel]?.[group] ?? 0
+
+  // 2 or more htlcs allowed per channel, more for outgoing
+  const inboundLimit = max(2, group)
+  const outboundLimit = max(2, group * 2)
+
+  const allowed = inboundPending < inboundLimit && outboundPending < outboundLimit
+
+  if (allowed) {
+    f.accept()
+    byChannel[f.in_channel][group] = inboundPending + 1
+    byChannel[f.out_channel][group] = outboundPending + 1
+    pendingForwardCount += 2
+  } else {
+    f.reject()
+  }
+
+  return allowed
 }
 
 let pendingPaymentCount = 0
@@ -41,19 +78,8 @@ const initialize = async ({ showLogs = true } = {}) => {
   const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
 
   subForwardRequests.on('forward_request', f => {
-    const group = getGroup(getFee(f))
-    const inputChannelN = byChannel[f.in_channel]?.[group] ?? 0
-    const outputChannelN = byChannel[f.out_channel]?.[group] ?? 0
-    const ok = inputChannelN < maxForGroup(group) && outputChannelN < maxForGroup(group)
-    if (ok) {
-      f.accept()
-      byChannel[f.in_channel][group] = inputChannelN + 1
-      byChannel[f.out_channel][group] = outputChannelN + 1
-      pendingForwardCount += 2
-    } else {
-      f.reject()
-    }
-    showLogs && say(f, ok)
+    const allowed = decideOnForward({ f })
+    showLogs && say(f, allowed)
   })
 
   updatePendingCounts({ subForwardRequests, showLogs })
@@ -109,7 +135,7 @@ const say = (f, isAccepted) =>
     ' amt, ',
     `${getFee(f).toFixed(3)}`.padStart(9),
     ' fee, ',
-    `~1e${getGroup(getFee(f))}`.padStart(7),
+    `~2^${getGroup(getFee(f))}`.padStart(7),
     f.in_channel.padStart(15),
     '->',
     f.out_channel.padEnd(15),
