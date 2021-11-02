@@ -51,6 +51,7 @@ const getFee = f => {
 
 // starts everything
 const initialize = async ({ showLogs = true } = {}) => {
+  showLogs && mention(`${getDate()} htlcLimiter()`)
   const authed = await mylnd()
   const subForwardRequests = subscribeToForwardRequests({ lnd: authed })
 
@@ -90,6 +91,7 @@ const decideOnForward = ({ f }) => {
   return allowed
 }
 
+// loop that updates all channel pending tx counts & sometimes fees
 const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
   let res = await bos.callAPI('getChannels')
   // if lnd issue, keep trying until fixed and then reinitialize
@@ -101,6 +103,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
       // at least one channel active so fixed, stop previous listener
       subForwardRequests.removeAllListeners()
       // start new ones
+      showLogs && mention(`${getDate()} htlcLimiter() lnd reached, re-initializing`)
       initialize({ showLogs })
       // this update loop will be replaced
       return null
@@ -116,8 +119,6 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
       byChannel[channel.id][group] = (byChannel[channel.id][group] || 0) + 1
       if (f.is_forward) pendingForwardCount++
       else pendingPaymentCount++
-
-      // if (f.is_forward) console.log(f)
     }
   }
 
@@ -143,7 +144,7 @@ const say = (f, isAccepted) =>
     f.in_channel.padStart(15),
     '->',
     f.out_channel.padEnd(15),
-    `(paying ${pendingPaymentCount}, forwarding ${pendingForwardCount})  in & out:`,
+    `(all channels: paying ${pendingPaymentCount}, forwarding ${pendingForwardCount})  in & out:`,
     JSON.stringify(byChannel[f.in_channel]),
     '&',
     JSON.stringify(byChannel[f.out_channel])
@@ -152,5 +153,5 @@ const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 const mention = (...args) => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`)
 
-// export default initialize // uncomment this to import
-initialize() // OR uncomment this to run from terminal
+export default initialize // uncomment this to import
+// initialize() // OR uncomment this to run from terminal
