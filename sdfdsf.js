@@ -10,14 +10,13 @@ import htlcLimiter from './htlcLimiter.js' // can limit number of htlcs per chan
 
 const { min, max, trunc, floor, abs, random, sqrt, log2, pow, ceil, exp, PI } = Math
 
-// allow actually adjusting fees and max htlc sizes and updating peer records
-// if false it will just print out what would've been to terminal & _feeChanges.txt
+// let it adjust fees and max htlc sizes and updating peer records (just simulates visually otherwise)
 const ADJUST_POLICIES = true
 // let it run bos.reconnect() at all
 const ALLOW_BOS_RECONNECT = true
-// let it rebalance
+// let it rebalance (just simulates visually otherwise)
 const ALLOW_REBALANCING = true
-// let it create a file to request resetting node from another process
+// let it request resetting node from another process to fix connections (by creating a file)
 const ALLOW_NODE_RESET = true
 // let it actively limit number of htlcs per channel
 const ALLOW_HTLC_LIMITER = true
@@ -30,18 +29,18 @@ const ONLY_USE_KEYSENDS = false
 
 // print out acceptable/rejection of htlc requests
 const SHOW_HTLC_REQUESTS = true
-// show rebalancing printouts
+// show rebalancing printouts (very wordy routing info)
 const SHOW_REBALANCE_LOG = false
 
 // suspect might cause tor issues if too much bandwidth being used
 // setting to 1 makes it try just 1 rebalance at a time
-const MAX_PARALLEL_REBALANCES = 2
+const MAX_PARALLEL_REBALANCES = 7
 
 // how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
 // time to sleep between trying a bot cycle again
-const MINUTES_BETWEEN_STEPS = 21
+const MINUTES_BETWEEN_STEPS = 7
 
 // hours between running bos reconnect
 const MINUTES_BETWEEN_RECONNECTS = 69
@@ -99,11 +98,13 @@ const MAX_PPM_ABSOLUTE = 5000
 const MIN_FEE_RATE_FOR_REBALANCE = 1
 // max fee rate for rebalancing even if channel earns more
 const MAX_FEE_RATE_FOR_REBALANCE = 1500
+// fee rate to stop forwards out of drained channel
+const ROUTING_STOPPING_FEE_RATE = 3333
 
 // max minutes to spend per rebalance try
-const MINUTES_FOR_REBALANCE = 5
+const MINUTES_FOR_REBALANCE = 7
 // max minutes to spend per keysend try
-const MINUTES_FOR_KEYSEND = 5
+const MINUTES_FOR_KEYSEND = 7
 
 // number of times to retry a rebalance on probe timeout while
 // increasing fee for last hop to skip all depleted channels
@@ -257,8 +258,8 @@ const runBotRebalanceOrganizer = async () => {
     // const capacity = remoteHeavy.capacity
     // const remoteSats = remoteHeavy.inbound_liquidity
 
-    // grab my outgoing fee for remote heavy peer
-    const myOutgoingFee = remoteHeavy.fee_rate
+    // grab my outgoing fee for remote heavy peer (from record if available)
+    const myOutgoingFee = getReferenceFee(remoteHeavy)
     // actual earning rate (how else to handle very small amounts giving incorrect fee rate?)
     const effectiveFeeRate = (floor(earnedOut) / routedOut) * 1e6 || 0
     // near MIN_SATS_PER_SIDE routed out will use effective fee, otherwise channel setting
@@ -280,9 +281,9 @@ const runBotRebalanceOrganizer = async () => {
     // low levels of emergency will try less hard
     // high level of emergency will go as high as subtractSafety allows
     maxRebalanceRate =
-      timeDependence *
+      timeDependence * // time dependence
       min(
-        // fee via weights from 0.5-1x of reference
+        // fee via weights from 0.5-1x of reference ppm
         maxRebalanceRate * (0.5 + 0.5 * levelOfEmergency),
         // fee via simple subtraction & division from reference
         subtractSafety(maxRebalanceRate)
@@ -345,7 +346,7 @@ const runBotRebalanceOrganizer = async () => {
       console.log(
         `  me☂️  ${dim}${myFeeAtLH} ${meAtLH} [ ||||-> ] ${remAtLH} ${remFeeAtLH}${undim} ${outOf} ${dim}--> ?` +
           ` -->${undim} ${into} ${dim}${remFeeAtRH} ${remAtRH} [ ||||-> ] ${meAtRH} ${myFeeAtRH}${undim}  me☂️  ` +
-          (match.isGoodPeer ? '💚' : '')
+          `${max(WEIGHT(match.remoteHeavy), WEIGHT(match.localHeavy)).toFixed(2)}w ${match.isGoodPeer ? '💚' : ''}`
       )
     }
     console.log('')
@@ -536,9 +537,10 @@ const findGoodPeerMatch = ({ remoteChannel, peerOptions }) => {
 
   // get historic info if available
   const logFileData = readRecord(remoteChannel.public_key)
+  const remoteRealFeeRate = getReferenceFee(remoteChannel)
 
   // remove balancing attempts below basic useful ppm
-  const balancingData = logFileData.rebalance?.filter(b => b.ppm < subtractSafety(remoteChannel.fee_rate)) || []
+  const balancingData = logFileData.rebalance?.filter(b => b.ppm < subtractSafety(remoteRealFeeRate)) || []
 
   // no past rebalance info for this remote heavy peer
   if (balancingData.length === 0) return -1
@@ -687,10 +689,10 @@ const includeForRemoteHeavyRebalance = p =>
   // only if no settings about it or if no setting for no remote-heavy rebalance true
   !getRuleFromSettings({ alias: p.alias })?.no_remote_rebalance &&
   // supposed rebalance fee unrealistically small
-  subtractSafety(p.fee_rate) > MIN_FEE_RATE_FOR_REBALANCE &&
+  subtractSafety(getReferenceFee(p)) > MIN_FEE_RATE_FOR_REBALANCE &&
   // rebalance fee (max) should be larger than incoming fee rate
   // or it's literally impossible since last hop costs more ppm already
-  subtractSafety(p.fee_rate) > p.inbound_fee_rate &&
+  subtractSafety(getReferenceFee(p)) > p.inbound_fee_rate &&
   // insufficient existing flow to remote side recently
   !acceptableFlowToLocal(p) &&
   // can't rebalance if inbound is disabled
@@ -936,16 +938,16 @@ const updateFees = async () => {
     // determine by how much to increase or decrease
 
     // check record for float ppm, if available and matches current ppm, use float, otherwise just use current ppm
-    const ppmRecord = logFileData?.ppmFloat
+    const ppmRecord = getReferenceFee(peer)
     // let ppmNew = ppmRecord && trunc(ppmRecord) === ppmOld ? ppmRecord : ppmOld
 
     // starting point is current fee rate
     // will have to change fee rates using settings.json file
     // on other hand, opening more channels at some fee rate won't reset current fee rate for all
-    let ppmNew = ppmRecord ?? ppmOld
+    let ppmNew = ppmRecord
 
     const outflow =
-      forwardsSinceUpdate[peer.public_key]?.reduce((sum, fw) => fw.mtokens / 1000 / daysSinceLastChange + sum, 0) || 0
+      forwardsSinceUpdate[peer.public_key]?.reduce((sum, fw) => fw.mtokens / 1000.0 / daysSinceLastChange + sum, 0) || 0
     // scale of outflow per day compared to half of capacity based on forwards since last fee update
     // starts at 0 and ~1 when flow rate per day is on scale of half capacity
     const outflowFactor = 1 - exp((-PI * 2 * outflow) / peer.capacity)
@@ -959,11 +961,8 @@ const updateFees = async () => {
     const ppmNewTrunc = trunc(ppmNew)
 
     // check if actual increase or decrease is necessary post changes & rules
-    isIncreasing = ppmNewTrunc > ppmOld
-    isDecreasing = ppmNewTrunc < ppmOld
-
-    // assemble warnings
-    const warnings = isVeryRemoteHeavy(peer) ? '💤-VRH' : ''
+    isIncreasing = ppmNewTrunc > trunc(ppmRecord)
+    isDecreasing = ppmNewTrunc < trunc(ppmRecord)
 
     // get the rest of channel policies figured out
     const localSats = ((peer.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(6)
@@ -977,11 +976,19 @@ const updateFees = async () => {
     const outflowString = outflow ? `${pretty(outflow).padStart(10)} sats/day` : ''
     const ppmNewString = ('(' + ppmNew.toFixed(3)).padStart(10) + ')'
 
+    const appliedFeeRate = isDrained(peer) ? max(ROUTING_STOPPING_FEE_RATE, ppmNewTrunc) : ppmNewTrunc
+
+    // assemble warnings
+    const warnings = [
+      isVeryRemoteHeavy(peer) ? '💤-VRH' : '',
+      isDrained(peer) ? `⛔-BLOCK ${appliedFeeRate}ppm` : ''
+    ].join(' ')
+
     if (isIncreasing) {
       nIncreased++
 
       // prettier-ignore
-      const feeIncreaseLine = `${getDate()} ${ca(peer.alias).padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNewTrunc.toFixed(0).padEnd(6)} ppm ${ppmNewString} ${flowString.padStart(15)} ${flowOutDaysString} days  ${localSats}|${remoteSats}  max htlc: ${byChannelPretty.padStart(11)} ${outflowString}  ⚠️`
+      const feeIncreaseLine = `${getDate()} ${ca(peer.alias).padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNewTrunc.toFixed(0).padEnd(6)} ppm ${ppmNewString} ${flowString.padStart(15)} ${flowOutDaysString} days  ${localSats}|${remoteSats}  max htlc: ${byChannelPretty.padStart(11)} ${outflowString}  ⚠️ ${warnings}`
       feeChangeSummary += feeIncreaseLine
       console.log(feeIncreaseLine)
 
@@ -991,7 +998,7 @@ const updateFees = async () => {
       nDecreased++
 
       // prettier-ignore
-      const feeDecreaseLine = `${getDate()} ${ca(peer.alias).padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNewTrunc.toFixed(0).padEnd(6)} ppm ${ppmNewString} ${flowString.padStart(15)} ${flowOutDaysString} days  ${localSats}|${remoteSats}  max htlc: ${byChannelPretty.padStart(11)}  🔻`
+      const feeDecreaseLine = `${getDate()} ${ca(peer.alias).padEnd(30)} ${ppmOld.toFixed(0).padStart(5)} -> ${ppmNewTrunc.toFixed(0).padEnd(6)} ppm ${ppmNewString} ${flowString.padStart(15)} ${flowOutDaysString} days  ${localSats}|${remoteSats}  max htlc: ${byChannelPretty.padStart(11)}  🔻 ${warnings}`
       feeChangeSummary += feeDecreaseLine
       console.log(feeDecreaseLine)
 
@@ -1010,7 +1017,7 @@ const updateFees = async () => {
       const errorCodeOnChangeAttempt = await bos.setPeerPolicy({
         peer_key: peer.public_key,
         by_channel_id, // max htlc sizes
-        fee_rate: ppmNewTrunc, // fee rate
+        fee_rate: appliedFeeRate, // fee rate
         my_key: mynode.my_public_key // speeds it up
       })
 
@@ -1281,6 +1288,11 @@ const generateSnapshots = async () => {
     delete receivedFromOthersLN[r.id]
   })
 
+  const policies =
+    (await bos.getNodeChannels({
+      public_key: mynode.my_public_key
+    })) || {}
+
   // summarize rebalances for each peer
   const rebalancesByPeer = rebalances.reduce((final, r) => {
     const outPeerPublicKey = r.hops[0]
@@ -1400,10 +1412,26 @@ const generateSnapshots = async () => {
         transaction_id: channelOnChainInfo[id].transaction_id,
         transaction_vout: channelOnChainInfo[id].transaction_vout,
         channel_age_days: channelAgeDays,
-
-        base_fee_mtokens: +feeRates[id].base_fee_mtokens,
-        fee_rate: +feeRates[id].fee_rate,
         capacity: channelOnChainInfo[id].capacity,
+
+        local_base_fee_mtokens: +feeRates[id].base_fee_mtokens,
+        local_fee_rate: +feeRates[id].fee_rate,
+        local_ctlv_delta: +policies[id]?.local.cltv_delta,
+        local_is_disabled: policies[id]?.local.is_disabled,
+        local_max_pending_mtokens: +channelOnChainInfo[id].local_max_pending_mtokens,
+        local_max_htlc_mtokens: +policies[id]?.local.max_htlc_mtokens,
+        local_min_htlc_mtokens: +policies[id]?.local.min_htlc_mtokens,
+        local_min_pending_mtokens: +channelOnChainInfo[id].local_min_htlc_mtokens,
+
+        remote_base_fee_mtokens: +feeRates[id].base_fee_mtokens,
+        remote_fee_rate: +feeRates[id].fee_rate,
+        remote_ctlv_delta: +policies[id]?.remote.cltv_delta,
+        remote_is_disabled: policies[id]?.remote.is_disabled,
+        remote_max_pending_mtokens: +channelOnChainInfo[id].remote_max_pending_mtokens,
+        remote_max_htlc_mtokens: +policies[id]?.remote.max_htlc_mtokens,
+        remote_min_htlc_mtokens: +policies[id]?.remote.min_htlc_mtokens,
+        remote_min_pending_mtokens: +channelOnChainInfo[id].remote_min_htlc_mtokens,
+
         sent: channelOnChainInfo[id].sent,
         received: channelOnChainInfo[id].received,
         onlineTimeFraction: +(
@@ -1412,12 +1440,6 @@ const generateSnapshots = async () => {
         ).toFixed(5),
         is_active: channelOnChainInfo[id].is_active,
         unsettled_balance: channelOnChainInfo[id].unsettled_balance,
-
-        // bugged in bos call getChannels right now? max gives "huge numbers" or min gives "0"
-        local_max_pending_mtokens: +channelOnChainInfo[id].local_max_pending_mtokens, // this seems wrong
-        remote_max_pending_mtokens: +channelOnChainInfo[id].remote_max_pending_mtokens,
-        local_min_htlc_mtokens: +channelOnChainInfo[id].local_min_htlc_mtokens,
-        remote_min_htlc_mtokens: +channelOnChainInfo[id].remote_min_htlc_mtokens,
 
         local_reserve: channelOnChainInfo[id].local_reserve,
         remote_reserve: channelOnChainInfo[id].remote_reserve,
@@ -1656,14 +1678,14 @@ const generateSnapshots = async () => {
 
     const lastRoutedIn = (Date.now() - p.routed_in_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedInString =
-      lastRoutedIn > DAYS_FOR_STATS
-        ? `routed-in (<--) ${DAYS_FOR_STATS}+? days ago`
-        : `routed-in (<--) ${lastRoutedIn.toFixed(1)} days ago`
+      lastRoutedIn > DAYS_FOR_STATS ? `${DAYS_FOR_STATS}+? days` : `${lastRoutedIn.toFixed(1)} days`
+    // ? `routed-in <--  ${DAYS_FOR_STATS}+? days ago`
+    // : `routed-in <--  ${lastRoutedIn.toFixed(1)} days ago`
     const lastRoutedOut = (Date.now() - p.routed_out_last_at) / (1000 * 60 * 60 * 24)
     const lastRoutedOutString =
-      lastRoutedOut > DAYS_FOR_STATS
-        ? `routed-out (-->) ${DAYS_FOR_STATS}+? days ago`
-        : `routed-out (-->) ${lastRoutedOut.toFixed(1)} days ago`
+      lastRoutedOut > DAYS_FOR_STATS ? `${DAYS_FOR_STATS}+? days ago` : `${lastRoutedOut.toFixed(1)} days ago`
+    // ? `routed-out (-->) ${DAYS_FOR_STATS}+? days ago`
+    // : `routed-out (-->) ${lastRoutedOut.toFixed(1)} days ago`
 
     const issues = []
 
@@ -1674,7 +1696,7 @@ const generateSnapshots = async () => {
       p.capacity > MIN_CHAN_SIZE &&
       p.routed_in_msats === 0 &&
       rebalanceSuggestionHistory.o.median &&
-      addSafety(rebalanceSuggestionHistory.o.bottom25) > p.fee_rate
+      addSafety(rebalanceSuggestionHistory.o.bottom25) > getReferenceFee(p)
     ) {
       issues.push('FEE-STUCK-LOW')
     }
@@ -1695,9 +1717,9 @@ const generateSnapshots = async () => {
       ${dim}${routeIn.padStart(26)} <---- routing ----> ${routeOut.padEnd(23)} +${routeOutEarned.padEnd(17)} ${routeInPpm.padStart(5)}|${routeOutPpm.padEnd(10)} ${('#' + p.routed_in_count).padStart(5)}|#${p.routed_out_count.toString().padEnd(5)}${undim}
       ${dim}${rebIn.padStart(26)} <-- rebalancing --> ${rebOut.padEnd(23)} -${rebOutFees.padEnd(17)} ${rebInPpm.padStart(5)}|${rebOutPpm.padEnd(10)} ${('#' + p.rebalanced_in_count).padStart(5)}|#${p.rebalanced_out_count.toString().padEnd(5)}${undim}
       ${dim}${lifeTimeReceivedFlowrate.padStart(26)} <- avg. lifetime -> ${lifetimeSentFlowrate.padEnd(23)} ${capacityUsed.padStart(18)} over ${oldestChannelAge}
+      ${dim}${' '.repeat(17)} ${lastRoutedInString} <-- last routed --> ${lastRoutedOutString}  ${lastPpmChangeString || 'no ppm change data found'}${undim}
       ${dim}${' '.repeat(17)}rebalances-in (<--) used (ppm): ${rebalanceHistory.s}${undim}
       ${dim}${' '.repeat(17)}rebalances-in (<--) est. (ppm): ${rebalanceSuggestionHistory.s}${undim}
-      ${dim}${' '.repeat(17)}${lastRoutedInString}, ${lastRoutedOutString}, ${lastPpmChangeString || 'no ppm change data found'}${undim}
 
     `
   }
@@ -1982,9 +2004,10 @@ const initialize = async () => {
   // generate snapshots at start to ensure recent data
   await generateSnapshots()
 
-  if (ALLOW_HTLC_LIMITER) htlcLimiter({ showLogs: SHOW_HTLC_REQUESTS })
-
   await sleep(5 * 1000)
+
+  // forwarding reuqest limiter
+  if (ALLOW_HTLC_LIMITER) htlcLimiter({ showLogs: SHOW_HTLC_REQUESTS })
 
   // start bot loop
   runBot()
@@ -2001,6 +2024,10 @@ const stepUpFee = (ppm, nudge) => ppm * (1 + nudge) + nudge * 100
 // trunc will speed up moves down to at least -1ppm
 const stepDownFee = (ppm, nudge) => trunc(ppm * (1 - nudge))
 
+// return recorded reference fee rate (actual fee rate can be higher to block routing)
+// or fall back to actual fee rate in channel
+const getReferenceFee = p => trunc(readRecord(p.public_key)?.ppmFloat ?? p.fee_rate)
+
 // if (isIncreasing) ppmNew = ppmNew * (1 + modifiedNudgeUp)
 // else if (isDecreasing) ppmNew = trunc(ppmNew * (1 - NUDGE_DOWN))
 
@@ -2016,6 +2043,8 @@ const isNetInflowing = p => p.routed_out_msats - p.routed_in_msats < 0
 const isVeryRemoteHeavy = p => p.outbound_liquidity < MIN_SATS_PER_SIDE
 // very local heavy = very few sats on remote side, the less the local-heavier
 const isVeryLocalHeavy = p => p.inbound_liquidity < MIN_SATS_PER_SIDE
+
+const isDrained = p => p.outbound_liquidity < MIN_SATS_PER_SIDE * 0.25
 
 const daysAgo = ts => (Date.now() - ts) / (1000 * 60 * 60 * 24)
 
