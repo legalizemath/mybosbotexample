@@ -11,12 +11,12 @@ import fs from 'fs'
 const RESET_RESULT_PATH = 'resetDone.json' // file has info on last job done
 const RESET_REQUEST_PATH = 'resetRequest.json' // create this file to start reset
 const RESET_HANDLER_ID_PATH = 'resetID.json' // just 1 should run
-const RESET_STOP_PATH = 'resetStop.json' // if exists, all processes terminate
+const RESET_STOP_PATH = 'resetStop.json' // if exists, this processes terminates (remove file to allow this to run)
 const LOOP_TIME_MS = 15 * 1000 // how often to check for request
 const MINUTES_FOR_SHELL_TIMEOUT = 20 // minutes before shell process terminates
 
 // handle resetting services by running the following
-const COMMAND_TO_RUN = 'sudo /home/me/Umbrel/scripts/stop && sleep 10 && sudo /home/me/Umbrel/scripts/start'
+const COMMAND_TO_RUN = 'sudo /home/umbrel/umbrel/scripts/stop && sleep 10 && sudo /home/umbrel/umbrel/scripts/start'
 
 // id = timestamp at initialization
 // avoid duplicate handlers
@@ -65,7 +65,7 @@ const runCheck = async () => {
     fs.writeFileSync(RESET_RESULT_PATH, JSON.stringify({ id, now, nowISO, res }, null, 2))
     console.log(`${nowISO} job done by ${id}`, res)
 
-    // get rid of request
+    // get rid of request to show its done
     fs.unlinkSync(RESET_REQUEST_PATH)
     console.log(`${nowISO} request removed by ${id}`)
   }
