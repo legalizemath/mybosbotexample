@@ -1,0 +1,72 @@
+{
+  "telegram": {          
+    "token": "1234567890:AA1234567890RR_AA1234567890-YYYWQQQ",
+    "chat_id": "1234567890"
+  },
+  "avoid": [
+    "// 1ml",
+    "0217890e3aad8d35bc054f43acc00084b25229ecff0ab68debd82883ad65ee8266",
+    "// gameb_1",
+    "023d70f2f76d283c6c4e58109ee3a2816eb9d8feb40b23d62469060a2b2867b77f",
+    "// bcyber",
+    "026db2cbf3d8ab4a4c01eed2df432d20cf0a13136402097574209d2595cb9e9d93",
+    "// tippin",
+    "03c2abfa93eacec04721c019644584424aab2ba4dff3ac9bdab4e9c97007491dda",
+    "// gameb_2",
+    "03c8dfbf829eaeb0b6dab099d87fdf7f8faceb0c1b935cd243e8c1fb5af71361cf",
+    "// neo_1",
+    "03ea08d787c0153d42f0aa286a1b7000de17d959771e059aadc1cf85d5f2a67e35",
+    "// trinity_1",
+    "02c43a8c5dd024c4d3c5be5612347f87cf90d79e5c2417861908d25f72046354c3",
+    "// morpheus_1",
+    "029f96fe33e4c3db0a7dc4039fb9e2a792bb99ef62589c9932bce2a59a06b650d7",
+    "// neo_2",
+    "03886b18969fd197358b66b6ab9bac2d5e32bb4e5157925bc0292acb3893a47237"
+  ],
+  "rules": [
+    {
+      "aliasMatch": "EXAMPLE OF EVERY SETTING THAT MATCHES NOTHING",
+      "min_ppm": 111,
+      "max_ppm": 1111,
+      "no_local_rebalance": true,
+      "no_remote_rebalance": true,
+      "max_htlc_sats": 50000000
+    },
+    {
+      "aliasMatch": "coinos",
+      "max_ppm": 999,
+      "max_ppm_NOTE": "they closed when too high last time"
+    },
+    {
+      "aliasMatch": "LNBIG",
+      "min_ppm": 555
+    },
+    {
+      "aliasMatch": "loopz",
+      "aliasMatch_NOTE": "to avoid matching with LOOP below, should really add pubkeys to this thing"
+    },
+    {
+      "aliasMatch": "LOOP",
+      "min_ppm": 2999,
+      "no_local_rebalance": true
+    },
+    {
+      "aliasMatch": "bfx-lnd",
+      "min_ppm": 555
+    },
+    {
+      "aliasMatch": "ACINQ",
+      "min_ppm": 555
+    },
+    {
+      "aliasMatch": "gameb",
+      "max_ppm": 0,
+      "max_ppm_NOTE": "want to keep sphinx tx cheap"
+    },
+    {
+      "aliasMatch": "",
+      "aliasMatch_NOTE": "fallback rules for any channel if unspecified above",
+      "max_ppm": 2000
+    }
+  ]
+}
