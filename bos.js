@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   Needs node v14+, node -v
-  Installed with `npm i -g balanceofsatoshis@10.18.1`
+  Installed with `npm i -g balanceofsatoshis@10.20.0`
   Linked via `npm link balanceofsatoshis`
 */
 
@@ -9,6 +9,7 @@ import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
 import lnd from 'balanceofsatoshis/lnd/index.js'
+// import lnservice from 'balanceofsatoshis/node_modules/ln-service/index.js'
 
 import {
   adjustFees as bosAdjustFees,
@@ -443,7 +444,7 @@ const callAPI = async (method, choices = {}, log = false) => {
       logger: logger(log)
     })
   } catch (e) {
-    console.error(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, e)
+    console.boring(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, JSON.stringify(e))
     return undefined
   }
 }
@@ -836,7 +837,7 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
       const outgoingPolicy = channel.policies.find(p => p.public_key === public_key)
       const incomingPolicy = channel.policies.find(p => p.public_key !== public_key)
       const remotePublicKey = incomingPolicy.public_key
-      if (peer_key && peer_key !== remotePublicKey) return channels_v2
+      if (peer_key && peer_key !== remotePublicKey) return channels_v2 // skip
       channels_v2[channel.id] = channel
       channels_v2[channel.id].local = outgoingPolicy
       channels_v2[channel.id].remote = incomingPolicy
@@ -846,7 +847,7 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
     }, {})
     return betterChannels
   } catch (e) {
-    console.error(JSON.stringify(e))
+    console.boring(JSON.stringify(e))
     return null
   }
 }
