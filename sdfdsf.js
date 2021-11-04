@@ -390,7 +390,7 @@ const runBotRebalanceOrganizer = async () => {
             maxSats: maxSatsToRebalanceAfterRules,
             maxMinutes: MINUTES_FOR_REBALANCE,
             maxFeeRate: maxRebalanceRate,
-            avoid: AVOID_LIST, // avoid these nodes in paths
+            avoid: JSON.parse(JSON.stringify(AVOID_LIST)), // avoid these nodes in paths
             retryAvoidsOnTimeout: RETRIES_ON_TIMEOUTS
           },
           undefined,
@@ -408,7 +408,7 @@ const runBotRebalanceOrganizer = async () => {
             maxMinutes: MINUTES_FOR_KEYSEND,
             maxFeeRate: maxRebalanceRate,
             retryAvoidsOnTimeout: RETRIES_ON_TIMEOUTS,
-            avoid: AVOID_LIST // avoid these nodes in paths
+            avoid: JSON.parse(JSON.stringify(AVOID_LIST)), // avoid these nodes in paths
           },
           // {} // no terminal output, too many things happening
           { details: SHOW_REBALANCE_LOG }
