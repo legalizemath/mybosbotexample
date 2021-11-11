@@ -125,7 +125,7 @@ const generatePage = async ({
         if (peerAny) pubkeyToAlias[peerAny.public_key] = peerAny.alias
       }
       // if not doesn't still exist, would have to just match channel id
-      peerAny = peerAny ?? { alias: 'unknown', public_key: '', id: any }
+      peerAny = peerAny ?? { alias: any, public_key: '', id: any }
     }
 
     // peerOut && console.log({ peerOut })
@@ -276,10 +276,14 @@ const generatePage = async ({
   const color1 = 'rgb(255, 99, 132)'
   const color2 = 'rgb(99, 132, 255)'
 
-  const dataForPlot1 = any && !xGroups ? dataForPlot.filter(v => v.from.includes(peerAny?.alias)) : dataForPlot
+  const dataForPlot1 =
+    any && !xGroups
+      ? dataForPlot.filter(v => v.from.includes(peerAny?.alias) || v.from.includes(peerAny?.id))
+      : dataForPlot
   const dataString1 = JSON.stringify(dataForPlot1)
 
-  const dataForPlot2 = any && !xGroups ? dataForPlot.filter(v => v.to.includes(peerAny?.alias)) : []
+  const dataForPlot2 =
+    any && !xGroups ? dataForPlot.filter(v => v.to.includes(peerAny?.alias) || v.to.includes(peerAny?.id)) : []
   const dataString2 = JSON.stringify(dataForPlot2)
 
   // const colorData = dataForPlot.map(v => color1)
