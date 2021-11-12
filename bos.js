@@ -437,12 +437,14 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 const callAPI = async (method, choices = {}, log = false) => {
   try {
     log && console.boring(`${getDate()} bos.callAPI() for ${method}`)
-    return await callRawApi({
-      lnd: await mylnd(),
-      method,
-      ask: (u, cbk) => cbk(null, choices),
-      logger: logger(log)
-    })
+    return (
+      (await callRawApi({
+        lnd: await mylnd(),
+        method,
+        ask: (u, cbk) => cbk(null, choices),
+        logger: logger(log)
+      })) || {}
+    )
   } catch (e) {
     console.boring(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, JSON.stringify(e))
     return undefined
@@ -833,36 +835,47 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
     // res.channels[id].policy.remote.fee_rate
     // and remote public key would be
     // res.channels[id].public_key
-    const betterChannels = res.channels.reduce((channels_v2, channel) => {
+    const betterChannels = res.channels.reduce((edited, channel) => {
       const outgoingPolicy = channel.policies.find(p => p.public_key === public_key)
       const incomingPolicy = channel.policies.find(p => p.public_key !== public_key)
       const remotePublicKey = incomingPolicy.public_key
-      if (peer_key && peer_key !== remotePublicKey) return channels_v2 // skip
-      channels_v2[channel.id] = channel
-      channels_v2[channel.id].local = outgoingPolicy
-      channels_v2[channel.id].remote = incomingPolicy
-      channels_v2[channel.id].public_key = remotePublicKey
+      if (peer_key && peer_key !== remotePublicKey) return edited // skip
+      edited[channel.id] = channel
+      edited[channel.id].local = outgoingPolicy
+      edited[channel.id].remote = incomingPolicy
+      edited[channel.id].public_key = remotePublicKey
+      channel.policies = null // just in case
       delete channel.policies
-      return channels_v2
+      return edited
     }, {})
-    return betterChannels
+    return copy(betterChannels)
   } catch (e) {
     console.boring(JSON.stringify(e))
     return null
   }
 }
 
-// safer way to set channel policy to avoid default resets
+// safer way to set channel policy to avoid default resets, no default values
 // if by_channel_id is specified, looks at channel id keys  for specific settings
 // by_channel_id: {'702673x1331x1': {max_htlc_mtokens: '1000000000' }}
-const setPeerPolicy = async (
-  { peer_key, by_channel_id, base_fee_mtokens, fee_rate, cltv_delta, max_htlc_mtokens, min_htlc_mtokens, my_key },
-  log = false
-) => {
+const setPeerPolicy = async (newPolicy, log = false) => {
+  const {
+    peer_key,
+    by_channel_id,
+    base_fee_mtokens,
+    fee_rate,
+    cltv_delta,
+    max_htlc_mtokens,
+    min_htlc_mtokens,
+    my_key
+  } = newPolicy
+
+  if (log) console.log(`${getDate()} setPeerPolicy()`, JSON.stringify(newPolicy, fixJSON))
+
   if (!peer_key) return 1
   let settings
   try {
-    // get my public key
+    // get my public key if not provided
     const me = my_key ?? (await callAPI('getIdentity')).public_key
     if (!me) return 1
 
@@ -872,6 +885,7 @@ const setPeerPolicy = async (
     if (Object.keys(channels).length === 0) {
       throw new Error('getNodeChannels returned {}, no current peer data')
     }
+
     log && console.log(`${getDate()} channels before changes: ${JSON.stringify(channels, fixJSON, 2)}`)
 
     // set settings for each channel with that peer & use ones provided to replace
@@ -944,6 +958,8 @@ const logger = log => ({
     log?.details ? console.log(getDate(), removeStyling(v)) : log?.progress ? process.stdout.write('.') : null,
   error: v => (log?.details ? console.error(getDate(), v) : log?.progress ? process.stdout.write('!') : null)
 })
+
+const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
 
 console.boring = (...args) => console.log(`\x1b[2m${args}\x1b[0m`)
 
