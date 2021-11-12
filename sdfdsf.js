@@ -132,8 +132,8 @@ const STAGGERED_LAUNCH_MS = 1111
 
 // memory handling
 const SHOW_RAM_USAGE = true
-const MEMORY_CALL_GC_OFTEN = 750 // MB of memory used where global garbage collector is called often
-const CHANCE_GARBAGE_COLLECT = 0.2 // probability to call garbage collector when printmemoryuse is called
+// const MEMORY_CALL_GC_OFTEN = 750 // MB of memory used where global garbage collector is called often
+// const CHANCE_GARBAGE_COLLECT = 0.2 // probability to call garbage collector when printmemoryuse is called
 
 // as 0-profit fee rate increases, fee rate where where proportional
 // fee takes over flat one is
@@ -2283,7 +2283,7 @@ const printMemoryUsage = text => {
   console.boring(`${getDate()} Using ${total} heapTotal & ${used} MB heapUsed & ${external} MB external. ${text}`)
 
   // above MEMORY_CALL_GC_OFTEN MB memory usage occasionally try to clear garbage
-  if (+total > MEMORY_CALL_GC_OFTEN && random() < CHANCE_GARBAGE_COLLECT && global?.gc) global.gc()
+  // if (+total > MEMORY_CALL_GC_OFTEN && random() < CHANCE_GARBAGE_COLLECT && global?.gc) global.gc()
 }
 
 // clean alias from emoji & non standard characters
