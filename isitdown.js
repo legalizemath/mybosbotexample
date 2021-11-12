@@ -16,7 +16,7 @@ const run = async () => {
       p.public_key.includes(matchString)
   )
 
-  if (!peer) console.log('peer not found')
+  if (!peer) return console.log('peer not found')
 
   const policies = await bos.getNodeChannels({ public_key: peer.public_key })
 
