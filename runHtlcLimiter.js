@@ -5,11 +5,11 @@ Limits # of htlcs in each channel
 Script periodically checks pending htlcs in channels and fee policy in channels.
 
 In parallel in watches for forwarding requests.
-It gets fee from either forwarding request or getChannels response & calculates it via policies.
+It gets fee from either forwarding request or calculates it from getChannels response + fee policies.
 It then gets which power of 2 range fee is.
 It looks at how many pending htlcs are already in this fee range in request's incoming & outgoing channels
-If # of htlcs for incoming channel is below some number (e.g. 2)
-and if # of htlcs for outgoing channel is below some number (e.g. 4)
+If # of htlcs for incoming channel is below some number (ALLOWED_PER_GROUP_MIN or ALLOWED_PER_GROUP_IN)
+and if # of htlcs for outgoing channel is below some number (ALLOWED_PER_GROUP_MIN or ALLOWED_PER_GROUP_OUT)
 it grants the request, otherwise rejects
 
 Now also can limit # of htlcs by size of htlc as secondary check to specifically address how much can end up being settled on chain
@@ -25,10 +25,10 @@ import bos from './bos.js'
 const { log2, floor, max } = Math
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
 
-const DEBUG = false
+const DEBUG = true
 
 const UPDATE_DELAY = 10 * 1000 // ms between updating active count, effectively rate limiter
-const FEE_UPDATE_DELAY = 60 * 60 * 1000 // ms between updating channel policies
+const FEE_UPDATE_DELAY = 62 * 60 * 1000 // ms between updating channel policies
 const LND_CHECK_DELAY = 2 * 60 * 1000 // ms between retrying lnd if issue
 
 // fee group settings
@@ -51,6 +51,8 @@ let pendingForwardCount = 0
 let outgoingCount = 0
 let incomingCount = 0
 let lastPolicyCheck = 0
+const keyToAlias = {}
+const idToKey = {}
 
 // get order of magnitude group number from sats
 // pow of 2 better for fees which have smaller range than good for pow of 10
@@ -133,24 +135,24 @@ const decideOnForward = ({ f, showLogs }) => {
 
   const allowed = allowedBasedOnFee && allowedBasedOnSize
 
-  DEBUG &&
-    printout(
-      JSON.stringify(
-        {
-          isBelowLimit,
-          inboundFeeGroupCount,
-          outboundFeeGroupCount,
-          inboundFeeGroupLimit,
-          outboundFeeGroupLimit,
-          inboundSmallSizeCount,
-          outboundSmallSizeCount,
-          group,
-          allowedBasedOnFee,
-          allowedBasedOnSize
-        },
-        fixJSON
-      )
-    )
+  // DEBUG &&
+  //   printout(
+  //     JSON.stringify(
+  //       {
+  //         isBelowLimit,
+  //         inboundFeeGroupCount,
+  //         outboundFeeGroupCount,
+  //         inboundFeeGroupLimit,
+  //         outboundFeeGroupLimit,
+  //         inboundSmallSizeCount,
+  //         outboundSmallSizeCount,
+  //         group,
+  //         allowedBasedOnFee,
+  //         allowedBasedOnSize
+  //       },
+  //       fixJSON
+  //     )
+  //   )
 
   if (allowed) {
     // this htlc will be in 2 channels so add to their counters
@@ -178,10 +180,10 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
   if (Date.now() - lastPolicyCheck > FEE_UPDATE_DELAY) {
     // node.policies = (await bos.getNodeChannels()) || node.policies
 
-    const getFeeRates = await bos.callAPI('getFeeRates')
+    const gotFeeRates = await bos.callAPI('getFeeRates')
 
-    if (getFeeRates) {
-      const feeRates = getFeeRates.channels?.reduce((final, channel) => {
+    if (gotFeeRates) {
+      const feeRates = gotFeeRates.channels?.reduce((final, channel) => {
         final[channel.id] = channel
         return final
       }, {})
@@ -189,10 +191,15 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
       if (feeRates) {
         node.policies = feeRates
         lastPolicyCheck = Date.now()
-        DEBUG && printout('fee rates updated')
+        // DEBUG && printout('fee rates re-parsed')
       }
 
-      global?.gc?.()
+      const peers = await bos.peers({ is_active: undefined, is_public: undefined })
+      peers.forEach(peer => {
+        keyToAlias[peer.public_key] = ca(peer.alias)
+      })
+
+      // global?.gc?.()
     }
   }
 
@@ -222,6 +229,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
   outgoingCount = 0
   incomingCount = 0
   for (const channel of channels) {
+    idToKey[channel.id] = channel.partner_public_key
     byChannel[channel.id] = { raw: copy(channel.pending_payments) }
     for (const f of channel.pending_payments) {
       const group = getGroup(getFee(f, true, channel.id))
@@ -233,14 +241,11 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
     }
   }
 
+  // console.log({ idToKey, keyToAlias })
   await sleep(UPDATE_DELAY)
 
-  showLogs && printMemoryUsage()
-
   // loop
-  // setImmediate(() =>
-  updatePendingCounts({ subForwardRequests, showLogs })
-  // )
+  setImmediate(() => updatePendingCounts({ subForwardRequests, showLogs }))
 }
 
 const announce = (f, isAccepted) => {
@@ -251,16 +256,18 @@ const announce = (f, isAccepted) => {
     `${getFee(f).toFixed(3)}`.padStart(9),
     ' fee ',
     `~2^${getGroup(getFee(f))}`.padStart(7),
+    (keyToAlias[idToKey[f.in_channel]] || f.in_channel).slice(0, 20).padStart(20),
+    '->',
+    (keyToAlias[idToKey[f.out_channel]] || f.out_channel).slice(0, 20).padEnd(20),
+    `all: {is_forward: ${pendingForwardCount}, other: ${pendingOtherCount}, out: ${outgoingCount}, in: ${incomingCount}}`,
     f.in_channel.padStart(15),
+    JSON.stringify({ ...byChannel[f.in_channel], raw: undefined }),
     '->',
     f.out_channel.padEnd(15),
-    `all: {is_forward: ${pendingForwardCount}, other: ${pendingOtherCount}, out: ${outgoingCount}, in: ${incomingCount}}`,
-    'in:',
-    JSON.stringify({ ...byChannel[f.in_channel], raw: undefined }),
-    'out:',
     JSON.stringify({ ...byChannel[f.out_channel], raw: undefined }),
     limiterProcess.stop ? '(stopped)' : ''
   )
+  DEBUG && printMemoryUsage('after reading channels')
 }
 
 const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
@@ -276,12 +283,17 @@ const printMemoryUsage = (text = '') => {
   // if (random() > 0.2) return null
 
   const memUse = process.memoryUsage()
-  const total = (memUse.heapTotal / 1024 / 1024).toFixed(1)
-  const used = (memUse.heapUsed / 1024 / 1024).toFixed(1)
-  const external = (memUse.external / 1024 / 1024).toFixed(1)
+  const total = (memUse.heapTotal / 1024 / 1024).toFixed(0)
+  const used = (memUse.heapUsed / 1024 / 1024).toFixed(0)
+  const external = (memUse.external / 1024 / 1024).toFixed(0)
+  const rss = (memUse.rss / 1024 / 1024).toFixed(0)
 
-  printout(`memory: ${total} heapTotal & ${used} MB heapUsed & ${external} MB external. ${text}`)
+  printout(
+    `memory: ${total} heapTotal & ${used} MB heapUsed & ${external} MB external & ${rss} MB resident set size. ${text}`
+  )
 }
+
+const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim()
 const fixJSON = (k, v) => (v === undefined ? null : v)
 const copy = item => JSON.parse(JSON.stringify(item))
 
