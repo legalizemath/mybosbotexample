@@ -3,6 +3,7 @@ dfgd_NOT_SAFE_TO_RUN_fgdfgdfgdfg
 
 import fs from 'fs' // comes with nodejs, to read/write log files
 import dns from 'dns' // comes with nodejs, to check if there's internet access
+import os from 'os' // comes with nodejs, system stuff
 
 // my scripts
 import bos from './bos.js' // my wrapper for bos, needs to be in same folder
@@ -42,13 +43,13 @@ const SHOW_REBALANCE_LOG = false
 
 // suspect might cause tor issues if too much bandwidth being used
 // setting to 1 makes it try just 1 rebalance at a time
-const MAX_PARALLEL_REBALANCES = 7
+const MAX_PARALLEL_REBALANCES = 5
 
 // how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
 // time to sleep between trying a bot cycle again
-const MINUTES_BETWEEN_STEPS = 7
+const MINUTES_BETWEEN_STEPS = 5
 
 // hours between running bos reconnect
 const MINUTES_BETWEEN_RECONNECTS = 69
@@ -132,8 +133,6 @@ const STAGGERED_LAUNCH_MS = 1111
 
 // memory handling
 const SHOW_RAM_USAGE = true
-// const MEMORY_CALL_GC_OFTEN = 750 // MB of memory used where global garbage collector is called often
-// const CHANCE_GARBAGE_COLLECT = 0.2 // probability to call garbage collector when printmemoryuse is called
 
 // as 0-profit fee rate increases, fee rate where where proportional
 // fee takes over flat one is
@@ -1034,7 +1033,7 @@ const updateFees = async () => {
   for (const peer of peers) {
     // current stats
     const now = Date.now()
-    const ppmOld = peer.fee_rate
+    // const ppmOld = peer.fee_rate // already getting this through getReferenceFee(peer)
     const flowOutRecentDaysAgo = daysAgo(peer.routed_out_last_at)
     const logFileData = readRecord(peer.public_key)
 
@@ -1109,6 +1108,7 @@ const updateFees = async () => {
     const outflowString = outflow ? `${pretty(outflow).padStart(10)} sats/day` : ''
     const ppmNewString = ('(' + ppmNew.toFixed(3)).padStart(10) + ')'
 
+    // use ROUTING_STOPPING_FEE_RATE if my side of channel is drained, or new tracked fee rate if higher or not drained
     const appliedFeeRate = isDrained(peer) ? max(ROUTING_STOPPING_FEE_RATE, ppmNewTrunc) : ppmNewTrunc
 
     // assemble warnings
@@ -1170,7 +1170,7 @@ const updateFees = async () => {
                 ppm: ppmNewTrunc,
                 ppmFloat: ppmNew,
                 // for ppm vs Fout data
-                ppm_old: ppmOld,
+                ppm_old: ppmRecord, // reference old reference ppm
                 routed_out_msats: peer.routed_out_msats,
                 daysNoRouting: +flowOutRecentDaysAgo.toFixed(1)
               },
@@ -1303,6 +1303,15 @@ const generateSnapshots = async () => {
   peers.forEach(p => {
     publicKeyToAlias[p.public_key] = p.alias
   })
+
+  // taking notes of when last seen in one place
+  const lastSeenPath = `${LOG_FILES}/lastSeen.json`
+  const lastSeen = fs.existsSync(lastSeenPath) ? JSON.parse(fs.readFileSync(lastSeenPath)) : {}
+  const now = Date.now()
+  for (const peer of peers) {
+    const isFirstRecord = peer.is_offline && !lastSeen[peer.public_key]
+    if (isFirstRecord || !peer.is_offline) lastSeen[peer.public_key] = now
+  }
 
   // specific routing events
 
@@ -1482,6 +1491,9 @@ const generateSnapshots = async () => {
   // ==================== add in all extra new data for each peer ==================
   peers.forEach(peer => {
     // fee_earnings is from bos peer call with days specified, not necessary hmm
+
+    // my rough estimate of last seen
+    peer.last_seen_days_ago = +daysAgo(lastSeen[peer.public_key]).toFixed(1)
 
     // place holders for rebelancing data
     peer.rebalanced_out_last_at = rebalancesByPeer[peer.public_key]?.rebalanced_out_last_at || 0
@@ -1694,6 +1706,8 @@ const generateSnapshots = async () => {
 
   const totalProfit = totalEarnedFromForwards - totalChainFees - totalFeesPaid
 
+  const memoryUsed = printMemoryUsage()
+
   peers.forEach(p => {
     // add this experimental flow rate calc (temp)
     // calculateFlowRateMargin(p)
@@ -1781,18 +1795,15 @@ const generateSnapshots = async () => {
           ' amount of remote via loop-in or opening channel to sinks like LOOP)'
     : ''
 }
+-------------------------------------------------------------
+    memory usage:                     ${(os.totalmem() / 1024 / 1024).toFixed(0)} MB system memory
+                                      ${(os.freemem() / 1024 / 1024).toFixed(0)} MB free system memory
+                                      ${memoryUsed?.totalString} MB heapTotal (available for js objects)
+                                      ${memoryUsed?.usedString} MB usedHeap (occupied by js objects)
+                                      ${memoryUsed?.externalString} MB external (buffers)
+                                      ${memoryUsed?.rssString} MB rss (node process consumption)
   `
   console.log(nodeSummary)
-
-  // taking notes of when last seen in one place
-  const lastSeenPath = `${LOG_FILES}/lastSeen.json`
-  const lastSeen = fs.existsSync(lastSeenPath) ? JSON.parse(fs.readFileSync(lastSeenPath)) : {}
-  const now = Date.now()
-  for (const peer of peers) {
-    const isFirstRecord = peer.is_offline && !lastSeen[peer.public_key]
-    if (isFirstRecord || !peer.is_offline) lastSeen[peer.public_key] = now
-  }
-  fs.writeFileSync(lastSeenPath, JSON.stringify(lastSeen))
 
   // by channel flow rate summary
 
@@ -1885,7 +1896,7 @@ const generateSnapshots = async () => {
       ${' '.repeat(15)}me  ${(p.fee_rate + 'ppm').padStart(7)} [-${local}--|--${remote}-] ${(p.inbound_fee_rate + 'ppm').padEnd(7)} ${p.alias} (./peers/${p.public_key.slice(0, 10)}.json) ${htlcsString}${p.balance.toFixed(1)}b ${isNetOutflowing(p) ? 'F_net-->' : ''}${isNetInflowing(p) ? '<--F_net' : ''} ${issuesString}
       ${dim}${routeIn.padStart(26)} <---- routing ----> ${routeOut.padEnd(23)} +${routeOutEarned.padEnd(17)} ${routeInPpm.padStart(5)}|${routeOutPpm.padEnd(10)} ${('#' + p.routed_in_count).padStart(5)}|#${p.routed_out_count.toString().padEnd(5)}${undim}
       ${dim}${rebIn.padStart(26)} <-- rebalancing --> ${rebOut.padEnd(23)} -${rebOutFees.padEnd(17)} ${rebInPpm.padStart(5)}|${rebOutPpm.padEnd(10)} ${('#' + p.rebalanced_in_count).padStart(5)}|#${p.rebalanced_out_count.toString().padEnd(5)}${undim}
-      ${dim}${lifeTimeReceivedFlowrate.padStart(26)} <- avg. lifetime -> ${lifetimeSentFlowrate.padEnd(23)} ${capacityUsed.padStart(18)} over ${oldestChannelAge}
+      ${dim}${lifeTimeReceivedFlowrate.padStart(26)} <- avg. lifetime -> ${lifetimeSentFlowrate.padEnd(23)} ${capacityUsed.padStart(18)} over ~${oldestChannelAge}
       ${dim}${' '.repeat(17)} ${lastRoutedInString} <-- last routed --> ${lastRoutedOutString}  ${lastPpmChangeString || 'no ppm change data found'}${undim}
       ${dim}${' '.repeat(17)}rebalances-in (<--) used (ppm): ${rebalanceHistory.s}${undim}
       ${dim}${' '.repeat(17)}rebalances-in (<--) est. (ppm): ${rebalanceSuggestionHistory.s}${undim}
@@ -1910,6 +1921,8 @@ const generateSnapshots = async () => {
   fs.writeFileSync(`${LOG_FILES}/${getDay()}_peers.json`, JSON.stringify(peers, fixJSON, 2))
   fs.writeFileSync(`${SNAPSHOTS_PATH}/peers.json`, JSON.stringify(peers, fixJSON, 2))
   fs.writeFileSync('_peers.json', JSON.stringify(peers, fixJSON, 2)) // got tired of opening folder
+  // last seen info in one place
+  fs.writeFileSync(lastSeenPath, JSON.stringify(lastSeen))
 
   // public key to peers.json index lookup table
   fs.writeFileSync(
@@ -1954,6 +1967,7 @@ routing rewards: ${
       { pr: 1 }
     ).s
   }
+memory used: ${memoryUsed?.totalString} MB
 `
   const { token, chat_id } = mynode.settings?.telegram || {}
   if (token && chat_id) bos.sayWithTelegramBot({ token, chat_id, message })
@@ -2034,6 +2048,12 @@ const runBotReconnect = async ({ quiet = false } = {}) => {
 
   const peers = await bos.peers({ is_active: undefined, is_public: undefined })
 
+  if (!peers) {
+    // try re-initializing
+    await bos.initializeAuth()
+    await sleep(2 * 60 * 1000)
+    return await runBotReconnect()
+  }
   if (peers.length === 0) return console.warn('no peers')
 
   const peersOffline = [...offline, ...reconnected] // peers.filter(p => p.is_offline)
@@ -2096,11 +2116,15 @@ const restartNodeProcess = async restarts => {
     process.exit(1)
   }
 
+  // re-initialize lnd access
+  await bos.initializeAuth()
   return true
 }
 // starts everything
 const initialize = async () => {
-  //
+  // get authrized access to node
+  await bos.initializeAuth()
+
   // get your own public key
   const getIdentity = await bos.callAPI('getIdentity')
   if (!getIdentity.public_key || getIdentity.public_key.length < 10) {
@@ -2173,7 +2197,7 @@ const initialize = async () => {
   await sleep(5 * 1000)
 
   // forwarding reuqest limiter
-  if (ALLOW_HTLC_LIMITER) mynode.htlcLimiter = htlcLimiter({ showLogs: SHOW_HTLC_REQUESTS })
+  if (ALLOW_HTLC_LIMITER) mynode.htlcLimiter = htlcLimiter(SHOW_HTLC_REQUESTS)
 
   // start bot loop
   runBot()
@@ -2276,14 +2300,15 @@ const printMemoryUsage = text => {
   if (!SHOW_RAM_USAGE) return null
 
   const memUse = process.memoryUsage()
-  const total = (memUse.heapTotal / 1024 / 1024).toFixed(1)
-  const used = (memUse.heapUsed / 1024 / 1024).toFixed(1)
-  const external = (memUse.external / 1024 / 1024).toFixed(1)
+  const totalString = (memUse.heapTotal / 1024 / 1024).toFixed(0)
+  const usedString = (memUse.heapUsed / 1024 / 1024).toFixed(0)
+  const externalString = (memUse.external / 1024 / 1024).toFixed(0)
+  const rssString = (memUse.rss / 1024 / 1024).toFixed(0)
 
-  console.boring(`${getDate()} Using ${total} heapTotal & ${used} MB heapUsed & ${external} MB external. ${text}`)
-
-  // above MEMORY_CALL_GC_OFTEN MB memory usage occasionally try to clear garbage
-  // if (+total > MEMORY_CALL_GC_OFTEN && random() < CHANCE_GARBAGE_COLLECT && global?.gc) global.gc()
+  console.boring(
+    `${getDate()} Using ${totalString} heapTotal & ${usedString} MB heapUsed & ${externalString} MB external & ${rssString} MB resident set size. ${text}`
+  )
+  return { ...memUse, usedString, totalString, externalString, rssString }
 }
 
 // clean alias from emoji & non standard characters
