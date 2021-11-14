@@ -34,13 +34,15 @@ const { trunc, min, ceil, random } = Math
 
 // use existing global bos authentication
 const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
+// and can set default one with initializeAuth()
+let authed
 
 // returns {closing_balance, offchain_balance, offchain_pending, onchain_balance, onchain_vbytes}
 const getDetailedBalance = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.getDetailedBalance()`)
+    log && boring(`${getDate()} bos.getDetailedBalance()`)
     const res = await bosGetDetailedBalance({
-      lnd: await mylnd(), // required
+      lnd: authed ?? (await mylnd()), // required
       ...choices
     })
     log && console.log(`${getDate()} bos.getDetailedBalance() complete`, res)
@@ -55,9 +57,9 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesPaid = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.getFeesPaid()`)
+    log && boring(`${getDate()} bos.getFeesPaid()`)
     const res = await bosGetFeesPaid({
-      lnds: [await mylnd()], // required
+      lnds: [authed ?? (await mylnd())], // required
       days: 30,
       // is_most_forwarded_table: // ?
       // is_most_fees_table: // ?
@@ -76,9 +78,9 @@ const getFeesPaid = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesChart = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.getFeesChart()`)
+    log && boring(`${getDate()} bos.getFeesChart()`)
     const res = await bosGetFeesChart({
-      lnds: [await mylnd()], // required
+      lnds: [authed ?? (await mylnd())], // required
       days: 30,
       is_count: false,
       is_forwarded: false,
@@ -96,9 +98,9 @@ const getFeesChart = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getChainFeesChart = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.getChainFeesChart()`)
+    log && boring(`${getDate()} bos.getChainFeesChart()`)
     const res = await bosGetChainFeesChart({
-      lnds: [await mylnd()], // required
+      lnds: [authed ?? (await mylnd())], // required
       days: 30,
       is_monochrome: true,
       request,
@@ -114,9 +116,9 @@ const getChainFeesChart = async (choices = {}, log = false) => {
 
 const forwards = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.forwards()`)
+    log && boring(`${getDate()} bos.forwards()`)
     const res = await bosGetForwards({
-      lnd: await mylnd(), // required
+      lnd: authed ?? (await mylnd()), // required
       fs: { getFile: readFile }, // required
       days: 1,
       // [from: public key]
@@ -133,9 +135,9 @@ const forwards = async (choices = {}, log = false) => {
 
 const reconnect = async (log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.reconnect()`)
+    log && boring(`${getDate()} bos.reconnect()`)
     const res = await bosReconnect({
-      lnd: await mylnd()
+      lnd: authed ?? (await mylnd())
     })
     log && console.log(`${getDate()} bos.reconnect() complete`, res)
     return res
@@ -164,11 +166,11 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    log?.details && console.boring(`${getDate()} bos.rebalance()`, JSON.stringify(options))
+    log?.details && boring(`${getDate()} bos.rebalance()`, JSON.stringify(options))
     if (fromChannel === toChannel) throw new Error('fromChannel same as toChannel')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
-      lnd: await mylnd(), // required
+      lnd: authed ?? (await mylnd()), // required
       logger: logger(log),
       out_channels: [], // seems necessary
       ...options
@@ -205,7 +207,7 @@ const rebalance = async (
       const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
 
       // log?.details &&
-      console.boring(
+      boring(
         `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
           ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
       )
@@ -275,14 +277,14 @@ const send = async (
       message
     }
 
-    log?.details && console.boring(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
+    log?.details && boring(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
 
     if (fromChannel === toChannel && toChannel !== undefined) throw new Error('fromChannel same as toChannel')
     if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
     if (isRebalance && !(fromChannel && toChannel)) throw new Error('need to specify from and to channels')
 
     const res = await bosPushPayment({
-      lnd: await mylnd(),
+      lnd: authed ?? (await mylnd()),
       logger: logger(log),
       fs: { getFile: readFile }, // required
       avoid, // required
@@ -319,7 +321,7 @@ const send = async (
 
     // if someone JUST changed fee try again just 1 more time
     if (!isRetry && e[1] === 'FeeInsufficient') {
-      console.boring(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
+      boring(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
       return await send(
         {
           destination,
@@ -348,7 +350,7 @@ const send = async (
       // each new retry moves avoid fee rate 25% closer to half max total fee rate
       const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
       const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
-      console.boring(
+      boring(
         `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
           ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
       )
@@ -400,10 +402,10 @@ const send = async (
 // returns new set fee
 const setFees = async (peerPubKey, fee_rate, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.setFees()`)
+    log && boring(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
-      lnd: await mylnd(),
+      lnd: authed ?? (await mylnd()),
       logger: {}, // logger not used
       to: [peerPubKey], // array of pubkeys to adjust fees towards
       fee_rate: String(fee_rate) // pm rate to set
@@ -434,28 +436,28 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // ^ updated just in updateRoutingFees
 // 'base_fee_mtokens' in getChannel and getFeeRates and getNode, not getChannels
 // ^ updated in updateRoutingFees
-const callAPI = async (method, choices = {}, log = false) => {
+const callAPI = async (method, { choices = {} } = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.callAPI() for ${method}`)
-    return (
-      (await callRawApi({
-        lnd: await mylnd(),
-        method,
-        ask: (u, cbk) => cbk(null, choices),
-        logger: logger(log)
-      })) || {}
-    )
+    log && boring(`${getDate()} bos.callAPI(${method})`)
+    const res = await callRawApi({
+      lnd: authed ?? (await mylnd()),
+      method,
+      ask: (u, cbk) => cbk(null, choices),
+      logger: logger(log)
+    })
+    return copy(res) || {}
+    // empty object if nothing good yet without caught errors
   } catch (e) {
-    console.boring(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, JSON.stringify(e))
-    return undefined
+    boring(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, JSON.stringify(e))
+    return null
   }
 }
 
 const find = async (query, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.find('${query}')`)
+    log && boring(`${getDate()} bos.find('${query}')`)
     return await lnd.findRecord({
-      lnd: await mylnd(),
+      lnd: authed ?? (await mylnd()),
       query
     })
   } catch (e) {
@@ -467,7 +469,7 @@ const find = async (query, log = false) => {
 // to get all peers including inactive just do bos.peers({ is_active: undefined })
 const peers = async (choices = {}, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.peers()`)
+    log && boring(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
       fs: { getFile: readFile }, // required
       lnd: await mylnd(),
@@ -498,10 +500,10 @@ const peers = async (choices = {}, log = false) => {
 // returns {pubkey: my_ppm_fee_rate}
 const getFees = async (log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.getFees()`)
+    log && boring(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
-      lnd: await mylnd(),
+      lnd: authed ?? (await mylnd()),
       logger: {}, // logger not used
       to: [] // array of pubkeys to adjust fees towards
     })
@@ -528,12 +530,12 @@ const getFees = async (log = false) => {
 // chat_id looks like 1231231231
 const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
   try {
-    log && console.boring(`${getDate()} bos.sayWithTelegramBot()`)
+    log && boring(`${getDate()} bos.sayWithTelegramBot()`)
     const res = await fetch(
       `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` + `&text=${encodeURIComponent(message)}`
     )
     const fullResponse = await res.json()
-    log && console.boring(`${getDate()} bos.sayWithTelegramBot() result:`, res, fullResponse)
+    log && boring(`${getDate()} bos.sayWithTelegramBot() result:`, res, fullResponse)
     return fullResponse
   } catch (e) {
     console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
@@ -571,7 +573,7 @@ const customGetForwardingEvents = async (
   } = {},
   log = false
 ) => {
-  log && console.boring(`${getDate()} bos.customGetForwardingEvents()`)
+  log && boring(`${getDate()} bos.customGetForwardingEvents()`)
 
   const started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
@@ -599,7 +601,7 @@ const customGetForwardingEvents = async (
     // get newer events
     const thisOffset = `{"offset":${pageSize * page++},"limit":${pageSize}}`
     const res = await callAPI('getForwards', { token: thisOffset })
-    log && console.boring(`${getDate()} this offset: ${thisOffset}`)
+    log && boring(`${getDate()} this offset: ${thisOffset}`)
 
     const forwards = res.forwards || [] // new to old
 
@@ -676,7 +678,7 @@ const customGetPaymentEvents = async (
   } = {},
   log = false
 ) => {
-  log && console.boring(`${getDate()} bos.customGetPaymentEvents()`)
+  log && boring(`${getDate()} bos.customGetPaymentEvents()`)
 
   const started = Date.now()
 
@@ -699,7 +701,7 @@ const customGetPaymentEvents = async (
     // get newer events
     const res = await callAPI('getPayments', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && console.boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
+    log && boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
     const payments = res.payments || [] // new to old
 
@@ -767,7 +769,7 @@ const customGetReceivedEvents = async (
   } = {},
   log = false
 ) => {
-  log && console.boring(`${getDate()} bos.customGetReceivedEvents()`)
+  log && boring(`${getDate()} bos.customGetReceivedEvents()`)
 
   const started = Date.now()
 
@@ -791,7 +793,7 @@ const customGetReceivedEvents = async (
     // get newer events
     const res = await callAPI('getInvoices', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && console.boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
+    log && boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
 
     const payments = (res.invoices || []) // new to old
@@ -840,17 +842,16 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
       const incomingPolicy = channel.policies.find(p => p.public_key !== public_key)
       const remotePublicKey = incomingPolicy.public_key
       if (peer_key && peer_key !== remotePublicKey) return edited // skip
-      edited[channel.id] = channel
+      edited[channel.id] = { ...channel }
       edited[channel.id].local = outgoingPolicy
       edited[channel.id].remote = incomingPolicy
       edited[channel.id].public_key = remotePublicKey
-      channel.policies = null // just in case
-      delete channel.policies
+      delete edited[channel.id].policies
       return edited
     }, {})
-    return copy(betterChannels)
+    return betterChannels
   } catch (e) {
-    console.boring(JSON.stringify(e))
+    boring(JSON.stringify(e))
     return null
   }
 }
@@ -938,7 +939,24 @@ const setPeerPolicy = async (newPolicy, log = false) => {
   }
 }
 
+const initializeAuth = async (providedAuth = undefined) => {
+  boring(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
+  try {
+    authed = providedAuth ?? (await mylnd())
+    const height = await callAPI('getHeight')
+    const pk = await callAPI('getIdentity')
+    boring(`${getDate()} lnd node ${pk?.public_key} at height ${height?.current_block_height} authorized`)
+    return authed
+  } catch (e) {
+    boring(`${getDate()} initializeAuth() aborted, retrying in 10s, e:`, JSON.stringify(e))
+    authed = undefined
+    await sleep(10 * 1000)
+    return await initializeAuth()
+  }
+}
+
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
+const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
 
 // const request = (o, cbk) => cbk(null, {}, {})
 const request = fetchRequest({ fetch })
@@ -961,7 +979,7 @@ const logger = log => ({
 
 const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
 
-console.boring = (...args) => console.log(`\x1b[2m${args}\x1b[0m`)
+const boring = (...args) => setImmediate(() => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`))
 
 const stylingPatterns =
   // eslint-disable-next-line no-control-regex
@@ -986,6 +1004,7 @@ const bos = {
   customGetReceivedEvents,
   getNodeChannels,
   setPeerPolicy,
-  find
+  find,
+  initializeAuth
 }
 export default bos
