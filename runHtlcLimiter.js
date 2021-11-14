@@ -28,7 +28,7 @@ const seconds = 1000
 const minutes = 60 * seconds
 
 // settings
-const DEBUG = true
+const DEBUG = false
 const MAX_RAM_USE_MB = 100 // end process at _ MB usedHeap, set to null to disable
 const UPDATE_DELAY = 10 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
 const FEE_UPDATE_DELAY = 42 * minutes // ms between re-checking channel policies
