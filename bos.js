@@ -436,7 +436,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // ^ updated just in updateRoutingFees
 // 'base_fee_mtokens' in getChannel and getFeeRates and getNode, not getChannels
 // ^ updated in updateRoutingFees
-const callAPI = async (method, { choices = {} } = {}, log = false) => {
+const callAPI = async (method, choices = {}, log = false) => {
   try {
     log && boring(`${getDate()} bos.callAPI(${method})`)
     const res = await callRawApi({
@@ -482,7 +482,6 @@ const peers = async (choices = {}, log = false) => {
       ...choices
     })
     const peers = res.peers
-
       // convert fee rate to just ppm
       .map(peer => ({
         ...peer,
@@ -945,10 +944,12 @@ const initializeAuth = async (providedAuth = undefined) => {
     authed = providedAuth ?? (await mylnd())
     const height = await callAPI('getHeight')
     const pk = await callAPI('getIdentity')
-    boring(`${getDate()} lnd node ${pk?.public_key} at height ${height?.current_block_height} authorized`)
+    boring(
+      `${getDate()} bos.initializeAuth() node ${pk?.public_key} at height ${height?.current_block_height} authorized`
+    )
     return authed
   } catch (e) {
-    boring(`${getDate()} initializeAuth() aborted, retrying in 10s, e:`, JSON.stringify(e))
+    boring(`${getDate()} bos.initializeAuth() aborted, retrying in 10s, e:`, JSON.stringify(e))
     authed = undefined
     await sleep(10 * 1000)
     return await initializeAuth()
