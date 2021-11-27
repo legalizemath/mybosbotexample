@@ -360,7 +360,7 @@ const runBotRebalanceOrganizer = async () => {
     // level of emergency decided by both channels 0-1
     const levelOfEmergency = max(WEIGHT(remoteHeavy), WEIGHT(localHeavy))
     // time dependence starts at 0 and ~1 after DAYS_FOR_FEE_REDUCTION
-    const channelsAge = min(...(remoteHeavy.ids?.map(c => c.channel_age_days) || [0]))
+    const channelsAge = min(...(remoteHeavy.ids?.map(c => c.channel_age_days || 0) || [0]))
     if (DEBUG && !remoteHeavy.ids) console.log('unknown channel ids on remote heavy peer', remoteHeavy)
     const timeDependence = 1 - exp((-PI * channelsAge) / DAYS_FOR_FEE_REDUCTION)
     // low levels of emergency will try less hard
