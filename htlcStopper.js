@@ -1,4 +1,8 @@
-// rejects all new htlcs
+// rejects any new htlcs
+// made so can reject new htlcs few minutes before shutting down node to avoid new pending htlcs
+
+// needs bos.js and package.json with {"type": "module"} in same folder
+// run with "npm link balanceofsatoshis && node htlcStopper"
 
 import { subscribeToForwardRequests } from 'balanceofsatoshis/node_modules/ln-service/index.js'
 import bos from './bos.js'
@@ -25,4 +29,4 @@ const printout = (...args) => {
 }
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 
-initialize(true)
+initialize()
