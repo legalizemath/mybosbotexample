@@ -30,7 +30,7 @@ const minutes = 60 * seconds
 // settings
 const DEBUG = false
 const MAX_RAM_USE_MB = null // end process at _ MB usedHeap, set to null to disable
-const UPDATE_DELAY = 15 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
+const UPDATE_DELAY = 12 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
 const FEE_UPDATE_DELAY = 42 * minutes // ms between re-checking channel policies
 const LND_CHECK_DELAY = 2 * minutes // ms between retrying lnd if issue
 
@@ -190,9 +190,9 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
 
   // occasionally update fee per channel data
   if (Date.now() - lastPolicyCheck > FEE_UPDATE_DELAY) {
-    // clean up previous data & log ram use
+    // clean up previous data & log ram use (rarely)
     global?.gc?.()
-    showLogs && getMemoryUsage()
+    // showLogs && MAX_RAM_USE_MB && getMemoryUsage()
 
     // fee rates in case any changed
     const gotFeeRates = await bos.callAPI('getFeeRates', { auth: node.auth })
@@ -208,7 +208,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
         lastPolicyCheck = Date.now()
 
         // grab aliases for convinient logging
-        const peers = await bos.peers({ is_active: undefined, is_public: undefined })
+        const peers = (await bos.peers({ is_active: undefined, is_public: undefined })) || []
         peers.forEach(peer => {
           keyToAlias[peer.public_key] = ca(peer.alias)
         })
@@ -260,7 +260,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
 
 const announce = (f, isAccepted) => {
   printout(
-    isAccepted ? 'accepted new htlc' : 'rejected new htlc',
+    isAccepted ? 'accepted htlc' : 'rejected htlc',
     `${getSats(f)}`.padStart(10),
     ' amt, ',
     `${getFee(f).toFixed(3)}`.padStart(9),
@@ -313,4 +313,4 @@ const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim()
 const copy = item => parse(stringify(item))
 
 export default initialize // uncomment this to import
-// initialize(true) // OR uncomment this to run from terminal
+// initialize(true) // OR uncomment this to run from terminal via: node htlcLimiter
