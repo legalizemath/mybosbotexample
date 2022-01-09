@@ -1,5 +1,5 @@
 // needs bos.js and package.json with {"type": "module"} in same folder
-// run with "npm link balanceofsatoshis && node getRemoteFees
+// run with "npm link balanceofsatoshis && node getFees
 
 import bos from './bos.js'
 
