@@ -521,7 +521,7 @@ const getFees = async (log = false) => {
     return myFees
   } catch (e) {
     console.error(`${getDate()} bos.getFees() aborted:`, e)
-    return undefined
+    return null
   }
 }
 
@@ -825,7 +825,7 @@ const customGetReceivedEvents = async (
 // gets node info and policies for every channel, slightly reformated
 // if peer_key is provided, will only return channels with that peer
 // if public_key not provided, will use this nodes public key
-const getNodeChannels = async ({ public_key, peer_key } = {}) => {
+const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {}) => {
   try {
     if (!public_key) public_key = (await callAPI('getIdentity')).public_key
     const res = await callAPI('getNode', { public_key, is_omitting_channels: false })
@@ -840,13 +840,25 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
       const outgoingPolicy = channel.policies.find(p => p.public_key === public_key)
       const incomingPolicy = channel.policies.find(p => p.public_key !== public_key)
       const remotePublicKey = incomingPolicy.public_key
-      if (peer_key && peer_key !== remotePublicKey) return edited // skip
-      edited[channel.id] = { ...channel }
-      edited[channel.id].local = outgoingPolicy
-      edited[channel.id].remote = incomingPolicy
-      edited[channel.id].public_key = remotePublicKey
-      delete edited[channel.id].policies
-      return edited
+      if (peer_key && peer_key !== remotePublicKey) return edited // not channel to peer requested if one was
+      const keyToUse = byPublicKey ? remotePublicKey : channel.id
+      if (byPublicKey) {
+        if (!edited[keyToUse]) edited[keyToUse] = []
+        // have to separate different channels to same public key in an array
+        const n = edited[keyToUse].push(channel)
+        edited[keyToUse][n - 1].local = outgoingPolicy
+        edited[keyToUse][n - 1].remote = incomingPolicy
+        edited[keyToUse][n - 1].public_key = remotePublicKey
+        delete edited[keyToUse][n - 1].policies // don't need anymore
+        return edited
+      } else {
+        edited[keyToUse] = channel
+        edited[keyToUse].local = outgoingPolicy
+        edited[keyToUse].remote = incomingPolicy
+        edited[keyToUse].public_key = remotePublicKey
+        delete edited[keyToUse].policies // don't need anymore
+        return edited
+      }
     }, {})
     return betterChannels
   } catch (e) {
@@ -854,6 +866,7 @@ const getNodeChannels = async ({ public_key, peer_key } = {}) => {
     return null
   }
 }
+const getNodePolicy = getNodeChannels // another name
 
 // safer way to set channel policy to avoid default resets, no default values
 // if by_channel_id is specified, looks at channel id keys  for specific settings
@@ -1004,6 +1017,7 @@ const bos = {
   customGetPaymentEvents,
   customGetReceivedEvents,
   getNodeChannels,
+  getNodePolicy,
   setPeerPolicy,
   find,
   initializeAuth
