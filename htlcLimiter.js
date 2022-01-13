@@ -313,4 +313,4 @@ const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim()
 const copy = item => parse(stringify(item))
 
 export default initialize // uncomment this to import
-// initialize(true) // OR uncomment this to run from terminal via: node htlcLimiter
+// initialize(true) // OR uncomment this to run from terminal via: node htlcLimite
