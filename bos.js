@@ -254,6 +254,7 @@ const send = async (
     // retryAvoidsOnTimeout = 0
     avoid = [],
     isRebalance = true, // double checks in/out peers specified to avoid using same for both
+    is_omitting_message_from = false, // old default to include your key in messages
     retryAvoidsOnTimeout = 0
   },
   log = { details: false, progress: true },
@@ -274,7 +275,8 @@ const send = async (
         ceil((sats * maxFeeRate) / 1e6), // from fee rate rounded up to next sat
         maxFee // from max fee in exact sats
       ),
-      message
+      message,
+      is_omitting_message_from
     }
 
     log?.details && boring(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
@@ -825,6 +827,7 @@ const customGetReceivedEvents = async (
 // gets node info and policies for every channel, slightly reformated
 // if peer_key is provided, will only return channels with that peer
 // if public_key not provided, will use this nodes public key
+// byPublicKey will use peer public key as object keys and values will be arrach of all channels to that peer
 const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {}) => {
   try {
     if (!public_key) public_key = (await callAPI('getIdentity')).public_key
