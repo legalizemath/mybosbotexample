@@ -1,6 +1,3 @@
-// NOT SAFE TO RUN
-dfgd_NOT_SAFE_TO_RUN_fgdfgdfgdfg
-
 import fs from 'fs' // comes with nodejs, to read/write log files
 import dns from 'dns' // comes with nodejs, to check if there's internet access
 import os from 'os' // comes with nodejs, system stuff
@@ -1778,8 +1775,8 @@ const generateSnapshots = async () => {
       // add up capacities which can be different from total sats if in flight sats
       peer.capacity += channelOnChainInfo[id].capacity
       // put highest base fee into peer
-      peer.remoteBaseFee = max(peer.remoteBaseFee, +policies[id].remote.base_fee_mtokens)
-      peer.baseFee = max(peer.baseFee, +policies[id].local.base_fee_mtokens)
+      peer.remoteBaseFee = max(peer.remoteBaseFee, +policies[id]?.remote.base_fee_mtokens)
+      peer.baseFee = max(peer.baseFee, +policies[id]?.local.base_fee_mtokens)
 
       // estimate channel age from opening transaction block height to minimize reliance on api
       const openingHeight = +id.split('x')[0]
@@ -1808,8 +1805,8 @@ const generateSnapshots = async () => {
         local_min_htlc_mtokens: +policies[id]?.local.min_htlc_mtokens,
         local_min_pending_mtokens: +channelOnChainInfo[id].local_min_htlc_mtokens,
 
-        remote_base_fee_mtokens: +policies[id].remote.base_fee_mtokens,
-        remote_fee_rate: +policies[id].remote.fee_rate,
+        remote_base_fee_mtokens: +policies[id]?.remote.base_fee_mtokens,
+        remote_fee_rate: +policies[id]?.remote.fee_rate,
         remote_ctlv_delta: +policies[id]?.remote.cltv_delta,
         remote_is_disabled: policies[id]?.remote.is_disabled,
         remote_max_pending_mtokens: +channelOnChainInfo[id].remote_max_pending_mtokens,
