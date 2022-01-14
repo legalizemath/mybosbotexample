@@ -1,3 +1,6 @@
+// for providing examples only, don't run without understanding
+sdfsdfs_NOT_SAFE_TO_RUN_dsfsdfsdf
+
 import fs from 'fs' // comes with nodejs, to read/write log files
 import dns from 'dns' // comes with nodejs, to check if there's internet access
 import os from 'os' // comes with nodejs, system stuff
