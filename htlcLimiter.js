@@ -30,20 +30,20 @@ const minutes = 60 * seconds
 // settings
 const DEBUG = false
 const MAX_RAM_USE_MB = null // end process at _ MB usedHeap, set to null to disable
-const UPDATE_DELAY = 12 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
+const UPDATE_DELAY = 10 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
 const FEE_UPDATE_DELAY = 42 * minutes // ms between re-checking channel policies
 const LND_CHECK_DELAY = 2 * minutes // ms between retrying lnd if issue
 
 // fee group settings
-const MIN_ORDER_OF_MAGNITUDE = 0 // lowest 2^_ fee group possible
+const MIN_ORDER_OF_MAGNITUDE = 0 // lowest 2^_ fee group possible (0 means all htlcs with fee rates below 1 sat are in same group)
 const ALLOWED_PER_GROUP_MIN = 2 // smallest amount of htlcs allowed per fee group
 const ALLOWED_PER_GROUP_IN = group => group // how many incoming htlcs allowed per fee group
-const ALLOWED_PER_GROUP_OUT = group => group * 2 // how many outgoing htlcs allowed per fee group
+const ALLOWED_PER_GROUP_OUT = group => group + 1 // * 2 // how many outgoing htlcs allowed per fee group
 
-// unsettled sats per htlc settings
+// unsettled sats per htlc settings (these are utxos we might potentially have to sweep or get lost on fees)
 const SATS_LIMIT = 10000 // can limit # of htlc below this size of sats unsettled, 0 would mean unused
 const ALLOWED_BELOW_LIMIT_IN = 2 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of inward ones
-const ALLOWED_BELOW_LIMIT_OUT = 4 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of outward ones
+const ALLOWED_BELOW_LIMIT_OUT = 3 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of outward ones
 
 // internal
 const limiterProcess = { stop: false } // process handler to prepare to stop node
@@ -57,35 +57,8 @@ let lastPolicyCheck = 0
 const keyToAlias = {}
 const idToKey = {}
 
-// get order of magnitude group number from sats
-// pow of 2 better for fees which have smaller range than good for pow of 10
-const getGroup = s => max(floor(log2(s)), MIN_ORDER_OF_MAGNITUDE)
-
-const getSats = f => f.tokens // get sats routed
-const getFee = (f, channelUpdate = false, foundId = null) => {
-  let fee = 0
-
-  // if fee known (as usually is in events) use that
-  if (f.fee_mtokens !== undefined) return (+f.fee_mtokens || 0) / 1000
-
-  // if not a forward with a clear outgoing channel put it into default fee group
-  if (f.is_forward) {
-    const outgoingChannelId = f.out_channel ?? foundId
-
-    if (!node.policies[outgoingChannelId]) {
-      // DEBUG && printout('no policy found', stringify(f, fixJSON), `found in channel ${foundId}`, `using fee ${fee}`)
-      return fee
-    }
-
-    const fee_rate = node.policies[outgoingChannelId]?.fee_rate || 0
-    const base_fee = (+node.policies[outgoingChannelId]?.base_fee_mtokens || 0) / 1000
-    fee = fee_rate * 1e-6 * f.tokens + base_fee
-  }
-
-  // DEBUG && printout('getFee', stringify(f, fixJSON), stringify({ foundId, fee }))
-
-  return fee
-}
+// get order of magnitude group number from sats using powers of 2 (instead of typical 10)
+const getGroup = sats => max(floor(log2(sats)), MIN_ORDER_OF_MAGNITUDE)
 
 // starts everything
 const initialize = async (showLogs = true) => {
@@ -93,12 +66,14 @@ const initialize = async (showLogs = true) => {
   node.auth = await bos.initializeAuth()
 
   try {
+    // will now be listening to events about forwarding requests
     const subForwardRequests = subscribeToForwardRequests({ lnd: node.auth })
-
     subForwardRequests.on('forward_request', f => decideOnForward({ f, showLogs }))
     // DEBUG && printout('new request', stringify({ ...forward, onion: undefined, hash: f.hash?.slice(0, 5) }, fixJSON))
 
+    // starts infinite async loop of updating snapshots of in flight htlcs for all channels
     updatePendingCounts({ subForwardRequests, showLogs })
+
     showLogs && printout('initialized')
     return limiterProcess
   } catch (e) {
@@ -112,38 +87,44 @@ const initialize = async (showLogs = true) => {
 const decideOnForward = ({ f, showLogs }) => {
   if (limiterProcess.stop) return f.reject() // f.reject() // if stop all new forwards
 
+  // gets fee rate group for this forward request
   const group = getGroup(getFee(f))
 
-  // how many unsettled in this fee group
+  // how many unsettled in this fee group in latest byChannel snapshot for both channels in forward request
   const inboundFeeGroupCount = byChannel[f.in_channel]?.[group] ?? 0
   const outboundFeeGroupCount = byChannel[f.out_channel]?.[group] ?? 0
 
   // count unsettled htlcs below amount of sats unsettled for in and out
   // only matters if below limit
   const isBelowLimit = f.tokens < SATS_LIMIT
+  // add up all the small-amount htlcs in the channel htlc is coming from
   const inboundSmallSizeCount = isBelowLimit
     ? -1
     : byChannel[f.in_channel]?.raw?.reduce((count, pending) => {
         const isBelowSizeLimit = pending.tokens < SATS_LIMIT
-        return count + isBelowSizeLimit ? 1 : 0
+        return count + (isBelowSizeLimit ? 1 : 0)
       }, 0) ?? 0
+  // add up all the small-amount htlcs in the channel htlc is asking to go to
   const outboundSmallSizeCount = isBelowLimit
     ? -1
     : byChannel[f.out_channel]?.raw?.reduce((count, pending) => {
         const isBelowSizeLimit = pending.tokens < SATS_LIMIT
-        return count + isBelowSizeLimit ? 1 : 0
+        return count + (isBelowSizeLimit ? 1 : 0)
       }, 0) ?? 0
 
-  // 2 or more htlcs allowed per channel, more for larger fee groups, more for outgoing
+  // allow at least ALLOWED_PER_GROUP_MIN htlcs per group, and then depending on group and direction maybe more
   const inboundFeeGroupLimit = max(ALLOWED_PER_GROUP_MIN, ALLOWED_PER_GROUP_IN(group))
   const outboundFeeGroupLimit = max(ALLOWED_PER_GROUP_MIN, ALLOWED_PER_GROUP_OUT(group))
 
+  // check if for this fee group there's enough available slots in both incoming and outgoing channel for request
   const allowedBasedOnFee = inboundFeeGroupCount < inboundFeeGroupLimit && outboundFeeGroupCount < outboundFeeGroupLimit
 
+  // if below limit, check if there's enough available slots for below limit htlcs in incoming and outgoing channels (above sat limit is always true)
   const allowedBasedOnSize =
     !isBelowLimit ||
     (inboundSmallSizeCount < ALLOWED_BELOW_LIMIT_IN && outboundSmallSizeCount < ALLOWED_BELOW_LIMIT_OUT)
 
+  // if both conditions pass, allow htlc
   const allowed = allowedBasedOnFee && allowedBasedOnSize
 
   // DEBUG &&
@@ -165,6 +146,7 @@ const decideOnForward = ({ f, showLogs }) => {
   //     )
   //   )
 
+  // snapshots aren't updated real time, so we update counts for tx we allow manually
   if (allowed) {
     // this htlc will be in 2 channels so add to their counters
     if (!byChannel[f.in_channel]) byChannel[f.in_channel] = {}
@@ -205,10 +187,11 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
 
       if (feeRates) {
         node.policies = feeRates
+        // move up last fee rate policy timestamp
         lastPolicyCheck = Date.now()
 
         // grab aliases for convinient logging
-        const peers = (await bos.peers({ is_active: undefined, is_public: undefined })) || []
+        const peers = (await bos.peers({})) || []
         peers.forEach(peer => {
           keyToAlias[peer.public_key] = ca(peer.alias)
         })
@@ -226,7 +209,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
     await sleep(LND_CHECK_DELAY)
     subForwardRequests.removeAllListeners()
     initialize(showLogs)
-    // stop this loop
+    // stop looping updatePendingCounts
     return null
   }
 
@@ -256,6 +239,32 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
 
   // loop
   setImmediate(() => updatePendingCounts({ subForwardRequests, showLogs }))
+}
+
+const getSats = f => f.tokens // get sats routed
+const getFee = (f, channelUpdate = false, foundId = null) => {
+  let fee = 0
+
+  // if fee known (as usually is in events) use that
+  if (f.fee_mtokens !== undefined) return (+f.fee_mtokens || 0) / 1000
+
+  // if not a forward with a clear outgoing channel put it into default fee group
+  if (f.is_forward) {
+    const outgoingChannelId = f.out_channel ?? foundId
+
+    if (!node.policies[outgoingChannelId]) {
+      // DEBUG && printout('no policy found', stringify(f, fixJSON), `found in channel ${foundId}`, `using fee ${fee}`)
+      return fee
+    }
+
+    const fee_rate = node.policies[outgoingChannelId]?.fee_rate || 0
+    const base_fee = (+node.policies[outgoingChannelId]?.base_fee_mtokens || 0) / 1000
+    fee = fee_rate * 1e-6 * f.tokens + base_fee
+  }
+
+  // DEBUG && printout('getFee', stringify(f, fixJSON), stringify({ foundId, fee }))
+
+  return fee
 }
 
 const announce = (f, isAccepted) => {
@@ -312,5 +321,5 @@ const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim()
 // const fixJSON = (k, v) => (v === undefined ? null : v)
 const copy = item => parse(stringify(item))
 
-export default initialize // uncomment this to import
-// initialize(true) // OR uncomment this to run from terminal via: node htlcLimite
+export default initialize
+// initialize() // comment out above line & uncomment this to run from terminal via: node htlcLimiter
