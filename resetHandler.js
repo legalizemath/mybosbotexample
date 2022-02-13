@@ -1,3 +1,5 @@
+// separate script for sudo permisions if necessary
+
 // can run at start with npm run start-all and this in package.json to give just this script sudo access
 // "scripts": {
 //   "start": "npm link balanceofsatoshis && node index.js",
@@ -9,14 +11,21 @@ import { spawn } from 'child_process'
 import fs from 'fs'
 
 const RESET_RESULT_PATH = 'resetDone.json' // file has info on last job done
-const RESET_REQUEST_PATH = 'resetRequest.json' // create this file to start reset
-const RESET_HANDLER_ID_PATH = 'resetID.json' // just 1 should run
-const RESET_STOP_PATH = 'resetStop.json' // if exists, this processes terminates (remove file to allow this to run)
+const RESET_HANDLER_ID_PATH = 'resetID.json' // keeps track of latest loop so just 1 runs
+
+const RESET_REQUEST_PATH = 'resetRequest.json' // this file will stop and start node to reset it
+const SHUTDOWN_REQUEST_PATH = 'shutdownRequest.json' // this will stop node and will not start it again
+
+const RESET_STOP_PATH = 'resetStop.json' // this file's existence will always terminate this script
+
 const LOOP_TIME_MS = 15 * 1000 // how often to check for request
 const MINUTES_FOR_SHELL_TIMEOUT = 20 // minutes before shell process terminates
 
 // handle resetting services by running the following
-const COMMAND_TO_RUN = 'sudo /home/umbrel/umbrel/scripts/stop && sleep 10 && sudo /home/umbrel/umbrel/scripts/start'
+const COMMAND_TO_RESET_NODE = 'sudo /home/me/Umbrel/scripts/stop && sleep 10 && sudo /home/me/Umbrel/scripts/start'
+
+// this is 1 time graceful shut down for low power scenario
+const COMMAND_TO_SHUTDOWN_NODE = 'sudo /home/me/Umbrel/scripts/stop'
 
 // id = timestamp at initialization
 // avoid duplicate handlers
@@ -55,24 +64,41 @@ const runCheck = async () => {
   fs.writeFileSync(RESET_HANDLER_ID_PATH, JSON.stringify({ id }))
 
   // check if requests to reset node exists
-  const requestFound = fs.existsSync(RESET_REQUEST_PATH)
+  const resetRequestFound = fs.existsSync(RESET_REQUEST_PATH)
 
   // new request so take action
-  if (requestFound) {
-    console.log(`${nowISO} request file found ${RESET_REQUEST_PATH}`)
-    const res = await runShellCommand(COMMAND_TO_RUN, { log: true })
+  if (resetRequestFound) {
+    console.log(`${nowISO} reset request file found ${RESET_REQUEST_PATH}`)
+    const res = await runShellCommand(COMMAND_TO_RESET_NODE, { log: true })
     // record result
     fs.writeFileSync(RESET_RESULT_PATH, JSON.stringify({ id, now, nowISO, res }, null, 2))
-    console.log(`${nowISO} job done by ${id}`, res)
+    console.log(`${nowISO} reset done by ${id}`, res)
 
     // get rid of request to show its done
     fs.unlinkSync(RESET_REQUEST_PATH)
-    console.log(`${nowISO} request removed by ${id}`)
+    console.log(`${nowISO} reset request removed by ${id}`)
   }
+
+  // check if requests to reset node exists
+  const shutdownRequestFound = fs.existsSync(SHUTDOWN_REQUEST_PATH)
+
+  // new request so take action
+  if (shutdownRequestFound) {
+    console.log(`${nowISO} shutdown request file found ${SHUTDOWN_REQUEST_PATH}`)
+    const res = await runShellCommand(COMMAND_TO_SHUTDOWN_NODE, { log: true })
+    // record result
+    fs.writeFileSync(RESET_RESULT_PATH, JSON.stringify({ id, now, nowISO, res }, null, 2))
+    console.log(`${nowISO} shutdown done by ${id}`, res)
+
+    // get rid of request to show its done
+    fs.unlinkSync(SHUTDOWN_REQUEST_PATH)
+    console.log(`${nowISO} shutdown request removed by ${id}`)
+  }
+  return null
 }
 
 // handles shell commands
-const runShellCommand = async (command, { log = false, timeout = MINUTES_FOR_SHELL_TIMEOUT * 60 * 1000 } = {}) => {
+const runShellCommand = async (command, { log = true, timeout = MINUTES_FOR_SHELL_TIMEOUT * 60 * 1000 } = {}) => {
   let stdout = []
   const stderr = []
   return new Promise((resolve, reject) => {
