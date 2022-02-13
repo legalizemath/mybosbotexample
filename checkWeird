@@ -33,7 +33,7 @@ const run = async () => {
     .filter(
       p =>
         // !p.some(chan => chan.local.is_disabled) && // we don't have it disabled (so likely they are online)
-        p.some(chan => chan.remote?.is_disabled) // they have it disabled to us
+        p.some(chan => chan.remote.is_disabled) // they have it disabled to us
     )
     .map(peerChannels => peerChannels[0].public_key)
 
@@ -52,7 +52,7 @@ const run = async () => {
 
   for (const public_key of printTheseChannels) {
     const isOffline = offline.includes(public_key) // offline.find(p => p.public_key === public_key)
-    const isActive = inactive.includes(public_key)
+    const isActive = !inactive.includes(public_key)
     const peer = peersByPublicKey[public_key] // peers.find(p => p.public_key === public_key)
     const localSats = peer.outbound_liquidity ?? 0
     const remoteSats = peer.inbound_liquidity ?? 0
