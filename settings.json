@@ -1,6 +1,6 @@
 {
   "telegram": {          
-    "token": "1234567890:AA1234567890RR_AA1234567890-YYYWQQQ",
+    "token": "1234567890:AA1234567890RR_AA1234567890-FAKEFAKE",
     "chat_id": "1234567890"
   },
   "avoid": [
@@ -25,47 +25,43 @@
   ],
   "rules": [
     {
-      "aliasMatch": "EXAMPLE OF EVERY SETTING THAT MATCHES NOTHING",
+      "// this wont be used, just a note": "EXAMPLE OF EVERY SETTING",
+      "aliasMatch": "not recommended to be used bc not unique",
+      "public_key": "can also do exact match by public key",
       "min_ppm": 111,
+      "// ^1 ": "will not set ppm below this",
       "max_ppm": 1111,
+      "// ^2 ": "will not set ppm above this",
       "no_local_rebalance": true,
+      "// ^3 ": "will not include this channel in rebalance if local-heavy on sats",
       "no_remote_rebalance": true,
-      "max_htlc_sats": 50000000
+      "// ^4 ": "will not include this channel in rebalance if remote-heavy on sats",
+      "max_htlc_sats": 50000000,
+      "// ^5 ": "will not set max htlc size above this value",
+      "days_for_fee_reduction": 1.0,
+      "// ^6 ": "will wait this many days before allowing ppm to drop"
     },
     {
-      "aliasMatch": "coinos",
+      "// alias": "coinos",
+      "public_key": "02868e12f320073cad0c2959c42559fbcfd1aa326fcb943492ed7f02c9820aa399",
       "max_ppm": 999,
-      "max_ppm_NOTE": "they closed when too high last time"
+      "// ^ ": "they closed when too high last time"
     },
     {
-      "aliasMatch": "LNBIG",
-      "min_ppm": 555
-    },
-    {
-      "aliasMatch": "loopz",
-      "aliasMatch_NOTE": "to avoid matching with LOOP below, should really add pubkeys to this thing"
-    },
-    {
-      "aliasMatch": "LOOP",
+      "// alias": "LOOP",
+      "public_key": "021c97a90a411ff2b10dc2a8e32de2f29d2fa49d41bfbb52bd416e460db0747d0d",
       "min_ppm": 2999,
       "no_local_rebalance": true
     },
     {
-      "aliasMatch": "bfx-lnd",
-      "min_ppm": 555
-    },
-    {
-      "aliasMatch": "ACINQ",
-      "min_ppm": 555
-    },
-    {
-      "aliasMatch": "gameb",
+      "// alias": "gameb_1",
+      "public_key": "023d70f2f76d283c6c4e58109ee3a2816eb9d8feb40b23d62469060a2b2867b77f",
       "max_ppm": 0,
-      "max_ppm_NOTE": "want to keep sphinx tx cheap"
+      "// ^ ": "want to keep sphinx tx cheap"
     },
     {
       "aliasMatch": "",
-      "aliasMatch_NOTE": "fallback rules for any channel if unspecified above",
+      "// ^ ": "fallback rules for any channel if unspecified above",
       "max_ppm": 2000
     }
   ]
