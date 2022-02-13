@@ -1,15 +1,15 @@
 /*
   Wrapper for balanceofsatoshis installed globally
-  Needs node v14+, node -v
-  Installed with `npm i -g balanceofsatoshis@10.20.0`
-  Linked via `npm link balanceofsatoshis`
+  Needs node v14+, check: node -v, using v16.13.2
+  Installed/updated with `npm i -g balanceofsatoshis@11.51.0`
+  Global install linked locally via `npm link balanceofsatoshis`
 */
 
 import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
 import lnd from 'balanceofsatoshis/lnd/index.js'
-// import lnservice from 'balanceofsatoshis/node_modules/ln-service/index.js'
+import lnService from 'balanceofsatoshis/node_modules/ln-service/index.js'
 
 import {
   adjustFees as bosAdjustFees,
@@ -32,15 +32,28 @@ import {
 
 const { trunc, min, ceil, random } = Math
 
-// use existing global bos authentication
-const mylnd = async () => (await lnd.authenticatedLnd({})).lnd
-// and can set default one with initializeAuth()
+// reused authentication object or making new ones uses up a TON of memory
+// re-initialize if node restarts with bos.initializeAuth()
 let authed
+
+// this method updates authentication object from global bos authentication
+// WARNING:
+// calling await lnd.authenticatedLnd({}) each time uses up some RAM
+// recalling this method doesn't seem to let go of previous RAM
+// # of times this is called must be kept low as each call leaks memory
+const mylnd = async () => {
+  authed = (await lnd.authenticatedLnd({})).lnd
+  return authed
+}
+// max MB RAM script can use, above terminated for memory leak
+const MAX_RAM_USE_MB = 250
+// This ms delay is longest it will ever back off from retrying if auth fails
+const MAX_RETRY_DELAY = 21 * 60 * 1000 // 21 minutes
 
 // returns {closing_balance, offchain_balance, offchain_pending, onchain_balance, onchain_vbytes}
 const getDetailedBalance = async (choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.getDetailedBalance()`)
+    log && logDim(`${getDate()} bos.getDetailedBalance()`)
     const res = await bosGetDetailedBalance({
       lnd: authed ?? (await mylnd()), // required
       ...choices
@@ -49,7 +62,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 
     return removeStyling(res)
   } catch (e) {
-    console.error(`\n${getDate()} bos.getDetailedBalance() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.getDetailedBalance() aborted:`, e?.message)
     return {}
   }
 }
@@ -57,7 +70,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesPaid = async (choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.getFeesPaid()`)
+    log && logDim(`${getDate()} bos.getFeesPaid()`)
     const res = await bosGetFeesPaid({
       lnds: [authed ?? (await mylnd())], // required
       days: 30,
@@ -70,7 +83,7 @@ const getFeesPaid = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesPaid() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesPaid() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.getFeesPaid() aborted:`, e?.message)
     return {}
   }
 }
@@ -78,27 +91,45 @@ const getFeesPaid = async (choices = {}, log = false) => {
 // returns {description, title, data: []}
 const getFeesChart = async (choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.getFeesChart()`)
+    log && logDim(`${getDate()} bos.getFeesChart()`)
     const res = await bosGetFeesChart({
       lnds: [authed ?? (await mylnd())], // required
       days: 30,
       is_count: false,
-      is_forwarded: false,
+      fs: { getFile: readFile },
       // via: <public key>
       ...choices
     })
     log && console.log(`${getDate()} bos.getFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesChart() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.getFeesChart() aborted:`, e?.message)
     return {}
   }
 }
 
+// pay an invoice/request (bolt-11)
+/*
+  {
+    avoid: [<Avoid Forwarding Through String>]
+    [fs]: {
+      getFile: <Read File Contents Function> (path, cbk) => {}
+    }
+    [in_through]: <Pay In Through Node With Public Key Hex String>
+    lnd: <Authenticated LND API Object>
+    logger: <Winston Logger Object>
+    max_fee: <Max Fee Tokens Number>
+    max_paths: <Maximum Paths Number>
+    [message]: <Message String>
+    out: [<Out Through Peer With Public Key Hex String>]
+    request: <BOLT 11 Payment Request String>
+  }
+  */
+
 // returns {description, title, data: []}
 const getChainFeesChart = async (choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.getChainFeesChart()`)
+    log && logDim(`${getDate()} bos.getChainFeesChart()`)
     const res = await bosGetChainFeesChart({
       lnds: [authed ?? (await mylnd())], // required
       days: 30,
@@ -109,14 +140,14 @@ const getChainFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getChainFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getChainFeesChart() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.getChainFeesChart() aborted:`, e?.message)
     return { data: [] }
   }
 }
 
 const forwards = async (choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.forwards()`)
+    log && logDim(`${getDate()} bos.forwards()`)
     const res = await bosGetForwards({
       lnd: authed ?? (await mylnd()), // required
       fs: { getFile: readFile }, // required
@@ -128,21 +159,21 @@ const forwards = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.forwards() complete`, res)
     return res.peers
   } catch (e) {
-    console.error(`\n${getDate()} bos.forwards() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.forwards() aborted:`, e?.message)
     return []
   }
 }
 
 const reconnect = async (log = false) => {
   try {
-    log && boring(`${getDate()} bos.reconnect()`)
+    log && logDim(`${getDate()} bos.reconnect()`)
     const res = await bosReconnect({
       lnd: authed ?? (await mylnd())
     })
     log && console.log(`${getDate()} bos.reconnect() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.reconnect() aborted:`, JSON.stringify(e))
+    console.error(`\n${getDate()} bos.reconnect() aborted:`, e?.message)
   }
 }
 
@@ -166,7 +197,7 @@ const rebalance = async (
       // out_inbound: undefined,
       ...choices
     }
-    log?.details && boring(`${getDate()} bos.rebalance()`, JSON.stringify(options))
+    log?.details && logDim(`${getDate()} bos.rebalance()`, JSON.stringify(options))
     if (fromChannel === toChannel) throw new Error('fromChannel same as toChannel')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
@@ -196,7 +227,7 @@ const rebalance = async (
     // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, JSON.stringify(e))
+    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, e?.message)
 
     // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
     if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
@@ -206,10 +237,13 @@ const rebalance = async (
       const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
       const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
 
+      const pkToAlias = await getPublicKeyToAliasTable()
+      const alias = ca(pkToAlias[toChannel] || '')
+
       // log?.details &&
-      boring(
-        `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
-          ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
+      logDim(
+        `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} with --avoid FEE_RATE<${newAvoidPpm}` +
+          ` to ${alias} ${toChannel.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
       )
 
       // for simplicity will always overwrite or create first item in avoid array
@@ -262,7 +296,9 @@ const send = async (
 ) => {
   try {
     const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
-    maxFee = maxFee ?? sats
+    if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
+
+    maxFee = maxFee ?? ceil(0.1 * sats) // 10% fallback if unspecified
     maxFeeRate = maxFeeRate ?? trunc(((1.0 * maxFee) / sats) * 1e6)
     const options = {
       destination,
@@ -279,10 +315,9 @@ const send = async (
       is_omitting_message_from
     }
 
-    log?.details && boring(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
+    log?.details && logDim(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
 
     if (fromChannel === toChannel && toChannel !== undefined) throw new Error('fromChannel same as toChannel')
-    if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
     if (isRebalance && !(fromChannel && toChannel)) throw new Error('need to specify from and to channels')
 
     const res = await bosPushPayment({
@@ -317,13 +352,13 @@ const send = async (
     */
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.send() aborted:`, JSON.stringify(e))
+    log?.details && console.error(`\n${getDate()} bos.send() aborted:`, e?.message)
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
 
     // if someone JUST changed fee try again just 1 more time
     if (!isRetry && e[1] === 'FeeInsufficient') {
-      boring(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
+      logDim(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
       return await send(
         {
           destination,
@@ -352,9 +387,13 @@ const send = async (
       // each new retry moves avoid fee rate 25% closer to half max total fee rate
       const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
       const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
-      boring(
-        `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} with --avoid ${newAvoid}` +
-          ` (for last peer). Retries left: ${retryAvoidsOnTimeout}`
+
+      const pkToAlias = await getPublicKeyToAliasTable()
+      const alias = ca(pkToAlias[toChannel] || '')
+
+      logDim(
+        `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} with --avoid FEE_RATE<${newAvoidPpm}` +
+          ` to ${alias} ${toChannel.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
       )
       // for simplicity will always overwrite or create first item in avoid array
       if ((avoid[0] || '').includes('FEE_RATE<')) avoid[0] = newAvoid
@@ -404,7 +443,7 @@ const send = async (
 // returns new set fee
 const setFees = async (peerPubKey, fee_rate, log = false) => {
   try {
-    log && boring(`${getDate()} bos.setFees()`)
+    log && logDim(`${getDate()} bos.setFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
       lnd: authed ?? (await mylnd()),
@@ -440,7 +479,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // ^ updated in updateRoutingFees
 const callAPI = async (method, choices = {}, log = false) => {
   try {
-    log && boring(`${getDate()} bos.callAPI(${method})`)
+    log && logDim(`${getDate()} bos.callAPI(${method})`)
     const res = await callRawApi({
       lnd: authed ?? (await mylnd()),
       method,
@@ -450,14 +489,15 @@ const callAPI = async (method, choices = {}, log = false) => {
     return copy(res) || {}
     // empty object if nothing good yet without caught errors
   } catch (e) {
-    boring(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, JSON.stringify(e))
+    logDim(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, e?.message)
     return null
   }
 }
+const call = callAPI
 
 const find = async (query, log = false) => {
   try {
-    log && boring(`${getDate()} bos.find('${query}')`)
+    log && logDim(`${getDate()} bos.find('${query}')`)
     return await lnd.findRecord({
       lnd: authed ?? (await mylnd()),
       query
@@ -468,30 +508,63 @@ const find = async (query, log = false) => {
   }
 }
 
-// to get all peers including inactive just do bos.peers({ is_active: undefined })
-const peers = async (choices = {}, log = false) => {
+/**
+ * Direct call to bos peers. Use default filters with peers() or show all with peers({}).
+ * See source reference for additional filters.
+ * Reference: https://github.com/alexbosworth/balanceofsatoshis/blob/master/network/get_peers.js
+ * @param {Object} choices
+ * @param {Boolean|undefined} [choices[].is_active = true] - show only if has active channels
+ * @param {Boolean|undefined} [choices[].is_public = true] - show only if has public channels
+ * @param {Boolean|undefined} [choices[].is_private = undefined] - show only if has private channels
+ * @param {Boolean|undefined} [choices[].is_offline = undefined] - show only offline peers
+ * @param {Boolean} [log = false] - log to console
+ * @returns (Object[]|null) - array of peers or null on error
+ */
+const peers = async (
+  choices = {
+    // defaults
+    is_active: true, // only connected peers
+    is_public: true // only public channels
+  },
+  log = false
+) => {
   try {
-    log && boring(`${getDate()} bos.peers()`)
+    log && logDim(`${getDate()} bos.peers()`)
     const res = await bosGetPeers({
       fs: { getFile: readFile }, // required
-      lnd: await mylnd(),
+      lnd: authed ?? (await mylnd()), // required
       omit: [], // required
-      is_active: !choices.is_offline, // only connected peers
-      is_public: true, // only public peers
-      is_private: false, // no private channels
-      is_offline: false, // online channels only by default
-      // earnings_days: 7, // can comment this out
       ...choices
     })
-    const peers = res.peers
+    const foundPeers = res.peers
       // convert fee rate to just ppm
       .map(peer => ({
         ...peer,
-        inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1] || 0
+        inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1]
       }))
 
     log && console.log(`${getDate()} bos.peers()`, JSON.stringify(peers, fixJSON, 2))
-    return peers
+    return foundPeers
+    /* typical result
+    {
+      alias: 'some alias',
+      fee_earnings: undefined,
+      downtime_percentage: undefined,
+      first_connected: '7 months ago',
+      last_activity: undefined,
+      inbound_fee_rate: 153,
+      inbound_liquidity: 3852992,
+      is_forwarding: undefined,
+      is_inbound_disabled: undefined,
+      is_offline: undefined,
+      is_pending: undefined,
+      is_private: undefined,
+      is_small_max_htlc: undefined,
+      is_thawing: undefined,
+      outbound_liquidity: 1146107,
+      public_key: '555555555555555555555555555555555555555555555555'
+    }
+    */
   } catch (e) {
     console.error(`${getDate()} bos.peers() aborted:`, e)
     return null
@@ -501,7 +574,7 @@ const peers = async (choices = {}, log = false) => {
 // returns {pubkey: my_ppm_fee_rate}
 const getFees = async (log = false) => {
   try {
-    log && boring(`${getDate()} bos.getFees()`)
+    log && logDim(`${getDate()} bos.getFees()`)
     const res = await bosAdjustFees({
       fs: { getFile: readFile }, // required
       lnd: authed ?? (await mylnd()),
@@ -527,16 +600,34 @@ const getFees = async (log = false) => {
   }
 }
 
+// ------------- custom frequently used functions -------------
+
+// get node info, https://github.com/alexbosworth/ln-service#getnode
+const getNodeFromGraph = async ({ public_key, is_omitting_channels = true }, log = false) => {
+  log && logDim(`${getDate()} bos.getNodeFromGraph()`)
+  try {
+    const res = await callAPI('getNode', { public_key, is_omitting_channels })
+    return res
+  } catch (e) {
+    console.error(`${getDate()} bos.getNodeFromGraph() aborted:`, e)
+    return null
+  }
+}
+
 // token looks like adsfasfdsf:adsfsadfasdfasfasdfasfd-asdfsf
 // chat_id looks like 1231231231
-const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
+const sayWithTelegramBot = async ({ token, chat_id, message, parse_mode = 'HTML' }, log = false) => {
+  // parse_mode can be undefined, or 'MarkdownV2' or 'HTML'
+  // https://core.telegram.org/bots/api#html-style
+  const parseModeString = parse_mode ? `&parse_mode=${parse_mode}` : ''
   try {
-    log && boring(`${getDate()} bos.sayWithTelegramBot()`)
+    log && logDim(`${getDate()} bos.sayWithTelegramBot()`)
     const res = await fetch(
-      `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` + `&text=${encodeURIComponent(message)}`
+      `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chat_id}` +
+        `&text=${encodeURIComponent(message)}${parseModeString}`
     )
     const fullResponse = await res.json()
-    log && boring(`${getDate()} bos.sayWithTelegramBot() result:`, res, fullResponse)
+    log && logDim(`${getDate()} bos.sayWithTelegramBot() result:`, JSON.stringify(fullResponse, null, 2))
     return fullResponse
   } catch (e) {
     console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
@@ -544,27 +635,24 @@ const sayWithTelegramBot = async ({ token, chat_id, message }, log = false) => {
   }
 }
 
-// ---- I needed this
-
-// does calls bos call getChannels and bos call getForwards
+// bos call getForwards (and calls bos call getChannels)
 // and returns by peer: {[public_keys]: [forwards]}
 // or by time: [forwards]
 // forwards look like this with my changes:
 /*
-{
-  created_at: '2021-09-10T14:31:44.000Z',
-  fee: 34,
-  fee_mtokens: 34253,
-  incoming_channel: '689868x588x1',
-  mtokens: 546018000,
-  outgoing_channel: '689686x689x1',
-  tokens: 546018,
-  created_at_ms: 1631284304000,
-  outgoing_peer: '03271338633d2d37b285dae4df40b413d8c6c791fbee7797bc5dc70812196d7d5c',
-  incoming_peer: '037cc5f9f1da20ac0d60e83989729a204a33cc2d8e80438969fadf35c1c5f1233b'
-}
+  {
+    created_at: '2021-09-10T14:31:44.000Z',
+    fee: 34,
+    fee_mtokens: 34253,
+    incoming_channel: '689868x588x1',
+    mtokens: 546018000,
+    outgoing_channel: '689686x689x1',
+    tokens: 546018,
+    created_at_ms: 1631284304000,
+    outgoing_peer: '03271338633d2d37b285dae4df40b413d8c6c791fbee7797bc5dc70812196d7d5c',
+    incoming_peer: '037cc5f9f1da20ac0d60e83989729a204a33cc2d8e80438969fadf35c1c5f1233b'
+  }
 */
-
 const customGetForwardingEvents = async (
   {
     days = 1, // how many days ago to look back
@@ -574,7 +662,7 @@ const customGetForwardingEvents = async (
   } = {},
   log = false
 ) => {
-  log && boring(`${getDate()} bos.customGetForwardingEvents()`)
+  log && logDim(`${getDate()} bos.customGetForwardingEvents()`)
 
   const started = Date.now()
   const isRecent = t => Date.now() - Date.parse(t) < days * 24 * 60 * 60 * 1000
@@ -602,7 +690,7 @@ const customGetForwardingEvents = async (
     // get newer events
     const thisOffset = `{"offset":${pageSize * page++},"limit":${pageSize}}`
     const res = await callAPI('getForwards', { token: thisOffset })
-    log && boring(`${getDate()} this offset: ${thisOffset}`)
+    log && logDim(`${getDate()} this offset: ${thisOffset}`)
 
     const forwards = res.forwards || [] // new to old
 
@@ -679,7 +767,7 @@ const customGetPaymentEvents = async (
   } = {},
   log = false
 ) => {
-  log && boring(`${getDate()} bos.customGetPaymentEvents()`)
+  log && logDim(`${getDate()} bos.customGetPaymentEvents()`)
 
   const started = Date.now()
 
@@ -702,7 +790,7 @@ const customGetPaymentEvents = async (
     // get newer events
     const res = await callAPI('getPayments', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
+    log && logDim(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
     const payments = res.payments || [] // new to old
 
@@ -770,7 +858,7 @@ const customGetReceivedEvents = async (
   } = {},
   log = false
 ) => {
-  log && boring(`${getDate()} bos.customGetReceivedEvents()`)
+  log && logDim(`${getDate()} bos.customGetReceivedEvents()`)
 
   const started = Date.now()
 
@@ -794,7 +882,7 @@ const customGetReceivedEvents = async (
     // get newer events
     const res = await callAPI('getInvoices', !nextOffset ? { limit: pageSize } : { token: nextOffset }, log)
 
-    log && boring(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
+    log && logDim(`${getDate()} this offset: ${nextOffset}, next offset: ${res.next}`)
     nextOffset = res.next
 
     const payments = (res.invoices || []) // new to old
@@ -828,6 +916,8 @@ const customGetReceivedEvents = async (
 // if peer_key is provided, will only return channels with that peer
 // if public_key not provided, will use this nodes public key
 // byPublicKey will use peer public key as object keys and values will be arrach of all channels to that peer
+// important: this seems to update much slower for your own node's new channels than callAPI('getFeeRates')
+// uses https://github.com/alexbosworth/ln-service#getnode
 const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {}) => {
   try {
     if (!public_key) public_key = (await callAPI('getIdentity')).public_key
@@ -843,12 +933,13 @@ const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {
       const outgoingPolicy = channel.policies.find(p => p.public_key === public_key)
       const incomingPolicy = channel.policies.find(p => p.public_key !== public_key)
       const remotePublicKey = incomingPolicy.public_key
-      if (peer_key && peer_key !== remotePublicKey) return edited // not channel to peer requested if one was
+      // if specific peer for this node was requested, ignore all other peer keys
+      if (peer_key && peer_key !== remotePublicKey) return edited
       const keyToUse = byPublicKey ? remotePublicKey : channel.id
       if (byPublicKey) {
         if (!edited[keyToUse]) edited[keyToUse] = []
         // have to separate different channels to same public key in an array
-        const n = edited[keyToUse].push(channel)
+        const n = edited[keyToUse].push(channel) // returns new array length
         edited[keyToUse][n - 1].local = outgoingPolicy
         edited[keyToUse][n - 1].remote = incomingPolicy
         edited[keyToUse][n - 1].public_key = remotePublicKey
@@ -865,7 +956,7 @@ const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {
     }, {})
     return betterChannels
   } catch (e) {
-    boring(JSON.stringify(e))
+    logDim(e?.message)
     return null
   }
 }
@@ -890,6 +981,7 @@ const setPeerPolicy = async (newPolicy, log = false) => {
 
   if (!peer_key) return 1
   let settings
+  const fails = []
   try {
     // get my public key if not provided
     const me = my_key ?? (await callAPI('getIdentity')).public_key
@@ -941,39 +1033,271 @@ const setPeerPolicy = async (newPolicy, log = false) => {
 
       if (!nothingChanged) {
         log && console.log(`${getDate()} bos call updateRoutingFees`, settings)
-        await bos.callAPI('updateRoutingFees', settings)
+        const res = await bos.callAPI('updateRoutingFees', settings)
+        if (res?.failures?.length) {
+          logDim(`${getDate()} bos call updateRoutingFees failures:`, JSON.stringify(res.failures))
+          fails.push(...res.failures)
+        }
       } else {
         log && console.log(`${getDate()} no policy changes necessary`)
       }
     }
 
-    return 0
+    return fails
   } catch (e) {
     log && console.error('error:', e, 'with settings:', settings)
-    return 1
+    fails.push(e)
+    return fails
   }
 }
 
-const initializeAuth = async (providedAuth = undefined) => {
-  boring(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
+// bos call pay
+const callPay = async (choices, log = false) => {
+  log && logDim(`${getDate()} bos.call.pay() with ${JSON.stringify(choices)}`)
+  const {
+    invoice = null, // absolutely required
+    maxFee = undefined, // max sats fee
+    maxFeeRate = undefined, // max ppm fee rate
+    maxMinutes = 1, // max waiting time
+    maxPaths = undefined, // max paths to split between,
+    fromChannels = undefined, // (Standard Channel Id Strings!) pay from these channels, array
+    incomingPeer = undefined, // optional, pay through this peer (public key) on last hop
+    options = {} // anything else
+  } = choices
+
+  // just abort if no invoice/request
+  if (!invoice) {
+    log && console.log(`${getDate()} bos.call.pay() request/invoice required`)
+    return null
+  }
+
   try {
-    authed = providedAuth ?? (await mylnd())
-    const height = await callAPI('getHeight')
-    const pk = await callAPI('getIdentity')
-    boring(
-      `${getDate()} bos.initializeAuth() node ${pk?.public_key} at height ${height?.current_block_height} authorized`
+    const parsedInvoice = lnService.parsePaymentRequest({ request: invoice })
+    const { tokens } = parsedInvoice
+
+    // use smaller of constraints for fee
+    const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
+    if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
+    const effectiveMaxFee = maxFee ?? ceil(0.1 * tokens) // 10% as fallback if unspecified
+    const effectiveMaxFeeRate = maxFeeRate ?? trunc(((1.0 * maxFee) / tokens) * 1e6)
+    const maxFeeUsed = min(effectiveMaxFee, ceil((tokens * effectiveMaxFeeRate) / 1e6))
+
+    // https://github.com/alexbosworth/ln-service#pay
+    const finalParams = {
+      incoming_peer: incomingPeer,
+      lnd: authed ?? (await mylnd()),
+      max_fee: maxFeeUsed,
+      max_paths: maxPaths,
+      outgoing_channel: fromChannels && fromChannels.length === 1 ? fromChannels[0] : undefined,
+      outgoing_channels: fromChannels && fromChannels.length > 1 ? fromChannels : undefined,
+      request: invoice,
+      pathfinding_timeout: trunc(maxMinutes * 60 * 1000),
+      ...options
+    }
+    log && console.log(`${getDate()} bos.call.pay(${JSON.stringify({ ...finalParams, lnd: undefined }, null, 2)})`)
+
+    const res = await lnService.pay(finalParams)
+
+    log && console.log(`${getDate()} bos.call.pay() complete`, res)
+    return res
+  } catch (e) {
+    console.error(`\n${getDate()} bos.call.pay() aborted:`, e?.message)
+    return null
+  }
+}
+
+const getIdToPublicKeyTable = async () => {
+  const table = {}
+  // from existing channels
+  try {
+    const getChannels = await callAPI('getChannels')
+    getChannels.channels.forEach(channel => {
+      table[channel.id] = channel.partner_public_key
+    })
+  } catch (e) {}
+  return table
+}
+
+const getPublicKeyToAliasTable = async () => {
+  const table = {}
+  try {
+    // from existing channels
+    const foundPeers = await peers({})
+    foundPeers.forEach(p => {
+      table[p.public_key] = p.alias
+    })
+  } catch (e) {}
+  return table
+}
+
+const getIdToAliasTable = async () => {
+  const table = {}
+  const idToPublicKey = await getIdToPublicKeyTable()
+  const publicKeyToAlias = await getPublicKeyToAliasTable()
+  for (const id in idToPublicKey) {
+    const pubkey = idToPublicKey[id]
+    table[id] = publicKeyToAlias[pubkey]
+  }
+  return table
+}
+
+const getRemoteDisabledCount = async ({ public_key }) => {
+  const policies = await bos.getNodeChannels({ public_key, byPublicKey: true })
+  if (!policies) return null
+
+  const theirChannelsByPeer = Object.values(policies)
+  const totalPeers = theirChannelsByPeer.length
+  // add up disables, just look at 1st channel for each peer
+  let remoteDisabled = 0
+  for (const channels of Object.values(policies)) {
+    if (channels[0].remote.is_disabled) remoteDisabled++
+  }
+  return {
+    totalPeers,
+    remoteDisabled,
+    remoteDisabledPercent: +((remoteDisabled / totalPeers) * 100).toFixed(0)
+  }
+}
+
+// https://github.com/alexbosworth/ln-service#removepeer
+const removePeer = async ({ public_key }, log = true) => {
+  log && logDim(`${getDate()} bos.removePeer(${JSON.stringify({ public_key })}) `)
+  try {
+    const res = await lnService.removePeer({
+      lnd: authed ?? (await mylnd()),
+      public_key
+    })
+    log && logDim(`${getDate()} bos.removePeer() done.`, JSON.stringify(res))
+    return res
+  } catch (e) {
+    console.log('bos.removePeer() error:', e?.message)
+    return null
+  }
+}
+
+// tries to add a peer with { public_key }
+// uses provided { socket } or pulls sockets from graph
+// if peer is currently connected it will try to disconnect first
+// https://github.com/alexbosworth/ln-service#addpeer
+const addPeer = async (choices, log = true) => {
+  const {
+    public_key, // required
+    socket, // optional, otherwise will try sockets in graph
+    timeout = 10000 // Connection Attempt Timeout Milliseconds Number
+  } = choices
+
+  const TIME_DELAY_SECONDS = 2.1
+  const sockets = []
+  let shortKey = ''
+
+  try {
+    log && logDim(`${getDate()} bos.addPeer(${JSON.stringify(choices)})`)
+    // must have public key
+    if (!public_key) throw new Error('must provide { public_key }')
+    shortKey = `${JSON.stringify(public_key.slice(0, 20))}...`
+    // figuring out which socket to use (address:port)
+
+    // check if we already have connection to this peer
+    const { peers } = (await callAPI('getPeers')) ?? {}
+    const thisPeer = peers.find(p => p.public_key === public_key)
+    const isConnected = !!thisPeer
+
+    // if no socket provided, get list of sockets from graph too
+    if (socket) {
+      sockets.push(socket)
+    } else {
+      // add current socket if already connected
+      if (isConnected) sockets.push(thisPeer.socket)
+      // add sockets from graph
+      const graphSockets = (await getNodeFromGraph({ public_key }))?.sockets?.map(i => i.socket) ?? []
+      sockets.push(...graphSockets)
+    }
+
+    if (!sockets) throw new Error(`${public_key} graph info not found`)
+    if (!sockets.length) throw new Error(`${public_key} no socket info in graph`)
+
+    // disconnect peer if already connected
+    if (isConnected) {
+      await removePeer({ public_key }, log)
+      await sleep(TIME_DELAY_SECONDS * 1000)
+    }
+
+    for (let i = 0; i < sockets.length; i++) {
+      if (i > 0) await sleep(TIME_DELAY_SECONDS * 1000)
+      log &&
+        logDim(`${getDate()} bos.addPeer(${shortKey}): ` + `trying socket ${i + 1}/${sockets.length}: ${sockets[i]}`)
+      try {
+        const res = await lnService.addPeer({
+          lnd: authed ?? (await mylnd()),
+          public_key,
+          socket: sockets[i],
+          timeout,
+          ...choices
+        })
+        log && logDim(`${getDate()} bos.addPeer(${shortKey}) connected`, res ?? '')
+      } catch (addError) {
+        log && logDim(`${getDate()} bos.addPeer(${shortKey}) connection attempt failed:`, JSON.stringify(addError))
+        // error means move onto next socket, if any available
+        continue
+      }
+      // no add peer error means it's connected
+      return sockets[i]
+    }
+    // every socket must have failed
+    throw new Error(`${public_key} failed to connect on all sockets (${sockets.length})`)
+  } catch (e) {
+    log && logDim(`${getDate()} bos.addPeer(${shortKey}) aborted`, e?.message)
+    return null
+  }
+}
+
+// initialize authentication object, includes checks to make sure it worked before returning
+const initializeAuth = async ({
+  providedAuth = undefined,
+  retryDelay = 10000 // initial delay for retry
+} = {}) => {
+  logDim(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
+
+  try {
+    if (!providedAuth) await mylnd()
+    if (providedAuth) authed = providedAuth
+
+    // doing command checks to see if node is responsive:
+
+    const height = await callAPI('getHeight') // does it know blockchain info
+    if (!height) throw new Error('node not ready (getHeight failed)')
+
+    const pk = await callAPI('getIdentity') // does it know its own identity
+    if (!pk) throw new Error('node not ready (getIdentity failed)')
+
+    const peers = await callAPI('getPeers') // does it know its channels
+    if (!peers) throw new Error('node not ready (getChannels failed)')
+
+    // if none of those erroed out, consider authorized
+
+    logDim(
+      `${getDate()} bos.initializeAuth() node auth success:`,
+      `${pk.public_key} id,`,
+      `${height.current_block_height} height`,
+      `${peers.length} peers`
     )
+
     return authed
   } catch (e) {
-    boring(`${getDate()} bos.initializeAuth() aborted, retrying in 10s, e:`, JSON.stringify(e))
+    // new retry delay will be twice of previous for exponential backoff, with max of MAX_RETRY_DELAY ms
+    const newRetryDelay = min(MAX_RETRY_DELAY, retryDelay * 2)
+    const newRetryDelaySeconds = trunc(newRetryDelay / 1000)
+
+    logDim(`${getDate()} bos.initializeAuth() error, retrying in ${newRetryDelaySeconds}s, e:`, e?.message)
     authed = undefined
-    await sleep(10 * 1000)
-    return await initializeAuth()
+    await sleep(newRetryDelay)
+    checkMemoryUsage() // terminates if memory leak found
+    return await initializeAuth({ retryDelay: newRetryDelay })
   }
 }
 
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
-const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
+const sleep = async ms => await new Promise(resolve => setTimeout(resolve, trunc(ms)))
 
 // const request = (o, cbk) => cbk(null, {}, {})
 const request = fetchRequest({ fetch })
@@ -988,6 +1312,7 @@ const removeStyling = o =>
     )
   )
 
+// to replace some logger bos uses internally
 const logger = log => ({
   info: v =>
     log?.details ? console.log(getDate(), removeStyling(v)) : log?.progress ? process.stdout.write('.') : null,
@@ -996,15 +1321,38 @@ const logger = log => ({
 
 const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
 
-const boring = (...args) => setImmediate(() => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`))
+const logDim = (...args) => setImmediate(() => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`))
 
 const stylingPatterns =
   // eslint-disable-next-line no-control-regex
   /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
 
+const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim()
+
+// until memory leak for getting auth object is fixed, might need this
+const checkMemoryUsage = () => {
+  const memUse = process.memoryUsage()
+  const heapTotal = trunc(memUse.heapTotal / 1024 / 1024)
+  const heapUsed = trunc(memUse.heapUsed / 1024 / 1024)
+  const external = trunc(memUse.external / 1024 / 1024)
+  const rss = trunc(memUse.rss / 1024 / 1024)
+
+  logDim(
+    `${getDate()} RAM check: ${heapTotal} heapTotal & ${heapUsed} MB heapUsed & ${external} MB external & ${rss} MB resident set size.`
+  )
+
+  if (rss > MAX_RAM_USE_MB || external > MAX_RAM_USE_MB || heapTotal > MAX_RAM_USE_MB) {
+    console.log(`${getDate()} Hit RAM use limit of ${MAX_RAM_USE_MB} & terminating`)
+    process.exit(1)
+  }
+
+  return { heapTotal, heapUsed, external, rss }
+}
+
 const bos = {
   peers,
   callAPI,
+  call, // same as callAPI
   getFees,
   setFees,
   rebalance,
@@ -1020,9 +1368,18 @@ const bos = {
   customGetPaymentEvents,
   customGetReceivedEvents,
   getNodeChannels,
-  getNodePolicy,
+  getNodePolicy, // same as getNodeChannels
   setPeerPolicy,
   find,
-  initializeAuth
+  initializeAuth,
+  callPay,
+  lnService,
+  getIdToPublicKeyTable,
+  getPublicKeyToAliasTable,
+  getIdToAliasTable,
+  getNodeFromGraph,
+  getRemoteDisabledCount,
+  addPeer,
+  removePeer
 }
 export default bos
