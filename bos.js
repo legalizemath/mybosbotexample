@@ -1160,7 +1160,7 @@ const getRemoteDisabledCount = async ({ public_key }) => {
 }
 
 // https://github.com/alexbosworth/ln-service#removepeer
-const removePeer = async ({ public_key }, log = true) => {
+const removePeer = async ({ public_key }, log = false) => {
   log && logDim(`${getDate()} bos.removePeer(${JSON.stringify({ public_key })}) `)
   try {
     const res = await lnService.removePeer({
@@ -1170,7 +1170,7 @@ const removePeer = async ({ public_key }, log = true) => {
     log && logDim(`${getDate()} bos.removePeer() done.`, JSON.stringify(res))
     return res
   } catch (e) {
-    console.log('bos.removePeer() error:', e?.message)
+    log && console.log('bos.removePeer() error:', e?.message)
     return null
   }
 }
@@ -1179,11 +1179,11 @@ const removePeer = async ({ public_key }, log = true) => {
 // uses provided { socket } or pulls sockets from graph
 // if peer is currently connected it will try to disconnect first
 // https://github.com/alexbosworth/ln-service#addpeer
-const addPeer = async (choices, log = true) => {
+const addPeer = async (choices, log = false) => {
   const {
     public_key, // required
     socket, // optional, otherwise will try sockets in graph
-    timeout = 10000 // Connection Attempt Timeout Milliseconds Number
+    timeout = 21000 // Connection Attempt Timeout Milliseconds Number
   } = choices
 
   const TIME_DELAY_SECONDS = 2.1
@@ -1194,7 +1194,7 @@ const addPeer = async (choices, log = true) => {
     log && logDim(`${getDate()} bos.addPeer(${JSON.stringify(choices)})`)
     // must have public key
     if (!public_key) throw new Error('must provide { public_key }')
-    shortKey = `${JSON.stringify(public_key.slice(0, 20))}...`
+    shortKey = `${public_key.slice(0, 20)}...`
     // figuring out which socket to use (address:port)
 
     // check if we already have connection to this peer
@@ -1252,14 +1252,17 @@ const addPeer = async (choices, log = true) => {
 }
 
 // initialize authentication object, includes checks to make sure it worked before returning
-const initializeAuth = async ({
-  providedAuth = undefined,
-  retryDelay = 10000 // initial delay for retry
-} = {}) => {
-  logDim(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
+const initializeAuth = async (
+  {
+    providedAuth = undefined,
+    retryDelay = 10000 // initial delay for retry
+  } = {},
+  log = true
+) => {
+  log && logDim(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
 
   try {
-    if (!providedAuth) await mylnd()
+    if (!providedAuth) authed = await mylnd()
     if (providedAuth) authed = providedAuth
 
     // doing command checks to see if node is responsive:
@@ -1270,17 +1273,18 @@ const initializeAuth = async ({
     const pk = await callAPI('getIdentity') // does it know its own identity
     if (!pk) throw new Error('node not ready (getIdentity failed)')
 
-    const peers = await callAPI('getPeers') // does it know its channels
-    if (!peers) throw new Error('node not ready (getChannels failed)')
+    const currentPeers = await peers({}) // does it know its peers
+    if (!currentPeers) throw new Error('node not ready (bos peers failed)')
 
-    // if none of those erroed out, consider authorized
+    // if none of those errored out, consider authorized
 
-    logDim(
-      `${getDate()} bos.initializeAuth() node auth success:`,
-      `${pk.public_key} id,`,
-      `${height.current_block_height} height`,
-      `${peers.length} peers`
-    )
+    log &&
+      logDim(
+        `${getDate()} bos.initializeAuth() node auth success:`,
+        `${pk.public_key} id,`,
+        `${height.current_block_height} height,`,
+        `${currentPeers.length} peers`
+      )
 
     return authed
   } catch (e) {
@@ -1292,7 +1296,7 @@ const initializeAuth = async ({
     authed = undefined
     await sleep(newRetryDelay)
     checkMemoryUsage() // terminates if memory leak found
-    return await initializeAuth({ retryDelay: newRetryDelay })
+    return await initializeAuth({ retryDelay: newRetryDelay }, log)
   }
 }
 
