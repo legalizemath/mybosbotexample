@@ -3,6 +3,7 @@ sdfsdfs_NOT_SAFE_TO_RUN_dsfsdfsdf
 
 import fs from 'fs' // comes with nodejs, to read/write log files
 import dns from 'dns' // comes with nodejs, to check if there's internet access
+// import os from 'os' // comes with nodejs, system stuff like memory checks
 
 // my scripts
 import bos from './bos.js' // my wrapper for bos, needs to be in same folder
@@ -14,8 +15,10 @@ const copy = item => JSON.parse(JSON.stringify(item)) // copy values to new item
 
 // let it adjust fees and max htlc sizes and updating peer records (just simulates visually otherwise)
 const ADJUST_POLICIES = true
-// let it run bos.reconnect() at all
+// let it run bos.reconnect() at all (tries to wake up some disabled channels by disconnecting them)
 const ALLOW_BOS_RECONNECT = true
+// try simple reconnecting to inactive or offline peers (safer to run frequently)
+const ALLOW_SIMPLE_RECONNECT = true
 // let it rebalance (just simulates visually otherwise)
 const ALLOW_REBALANCING = true
 // let it request resetting node from another process to fix connections (by creating a file for resetHandler.js to see)
@@ -64,8 +67,11 @@ const MAX_PARALLEL_REBALANCES = 5
 // how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
-// hours between running bos reconnect
-const MINUTES_BETWEEN_RECONNECTS = 17 * 60 // offset from 24 hours to shift around when
+// hours between running bos reconnect (does some disable-based reconnections)
+const MINUTES_BETWEEN_RECONNECTS = 21.69 * 60 // offset from 24 hours to shift around when
+// hours between running basic offline/inactive reconnect
+const MINUTES_BETWEEN_SIMPLE_RECONNECTS = 69
+
 // minimum sats away from 0.5 balance to consider off-balance
 const MIN_SATS_OFF_BALANCE = 420e3
 // unbalanced sats below this can stop (bos rebalance requires >50k)
@@ -148,7 +154,8 @@ const MIN_MINUTES_BETWEEN_SAME_PAIR = (MINUTES_BETWEEN_STEPS + MINUTES_FOR_REBAL
 // max rebalance repeats while successful
 // if realized rebalance rate is > 1/2 max rebalance rate
 // this will just limit repeats when there's no major discounts
-const MAX_BALANCE_REPEATS = 10
+const MAX_REBALANCE_REPEATS = 10 // without major discount
+const MAX_REBALANCE_REPEATS_ANY = 21 // with even discounts
 
 // ms to put between each rebalance launch for safety
 const STAGGERED_LAUNCH_MS = 1111
@@ -205,9 +212,11 @@ const PEERS_LOG_PATH = './peers'
 const LOG_FILES = './logs'
 const TIMERS_PATH = 'timers.json'
 const SETTINGS_PATH = 'settings.json'
+const LAST_SEEN_PATH = `${LOG_FILES}/lastSeen.json`
 
 const DEFAULT_TIMERS = {
   lastReconnect: 0,
+  lastSimpleReconnect: 0,
   lastFeeUpdate: 0,
   lastCleaningUpdate: 0,
   lastDailyReset: 0,
@@ -226,7 +235,7 @@ const mynode = {
 }
 
 const runBot = async () => {
-  console.boring(`${getDate()} runBot()`)
+  logDim('runBot()')
 
   // clean up memory if gc exposed with --expose-gc
   global?.gc?.()
@@ -252,6 +261,10 @@ const runBot = async () => {
   await runCleaningCheck()
   await sleep(5 * seconds)
 
+  // simple reconnect
+  await runSimpleReconnect()
+  await sleep(5 * 1000)
+
   // do rebalancing
   await runBotRebalanceOrganizer()
   // await sleep(5 * 1000)
@@ -261,6 +274,100 @@ const runBot = async () => {
 
   // restart
   runBot()
+}
+
+// my own reconnect method that doesn't disconnect channels based on just disables
+// so can run frequently without risking instability
+const runSimpleReconnect = async () => {
+  if (!ALLOW_SIMPLE_RECONNECT) return null
+  const minutesSinceLast = minutesAgo(mynode.timers.lastSimpleReconnect || 0)
+  if (minutesSinceLast > MINUTES_BETWEEN_SIMPLE_RECONNECTS) {
+    logDim('runSimpleReconnect(): time to run')
+    updateBotTimers({ lastSimpleReconnect: Date.now() })
+  } else {
+    const timeUntil = (MINUTES_BETWEEN_SIMPLE_RECONNECTS - minutesSinceLast).toFixed(0)
+    logDim(`runSimpleReconnect(): not time to run yet. (Scheduled in ${timeUntil}+ minutes)`)
+    return null
+  }
+
+  // key to alias table
+  const pkToAlias = await bos.getPublicKeyToAliasTable()
+
+  // get offline peers pubkeys
+  const peers = await bos.peers({})
+  const peersTotal = peers?.length
+  const offline = peers?.filter(p => p.is_offline).map(p => p.public_key) || []
+
+  // get inactive peers pubkeys
+  const channels = (await bos.callAPI('getChannels'))?.channels || []
+  const inactive = unique(channels.filter(c => !c.is_active).map(c => c.partner_public_key))
+
+  // combine offline and inactive list
+  const listToReconnect = unique([...offline, ...inactive])
+  const finalReconnected = []
+  const finalOffline = []
+
+  // reconnnect each one
+  const reconnectionTasks = []
+  for (const public_key of listToReconnect) {
+    const reconnection = bos.addPeer({ public_key }).then(res => {
+      if (res) {
+        finalReconnected.push(public_key)
+        logDim(`Reconnected to ${pkToAlias[public_key] || public_key.slice(0, 20)}`)
+      } else {
+        finalOffline.push(public_key)
+        logDim(`Failed to reconnect to ${pkToAlias[public_key] || public_key.slice(0, 20)}`)
+      }
+    })
+    reconnectionTasks.push(reconnection)
+    // launch in parallel but space apart starting reconnects by few seconds
+    const STAGGERED_RECONNECTS_MS = 7 * seconds
+    await sleep(STAGGERED_RECONNECTS_MS, { quiet: true })
+  }
+
+  // wait until all the reconnection tasks are complete
+  await Promise.all(reconnectionTasks)
+
+  // make a nice summary of results
+  const lastSeen = fs.existsSync(LAST_SEEN_PATH) ? JSON.parse(fs.readFileSync(LAST_SEEN_PATH)) : {}
+  const peersDisabledToMe = peers.filter(p => p.is_inbound_disabled).map(p => p.public_key)
+
+  // sort by offline time
+  finalOffline.sort((a, b) => (lastSeen[a] || 0) - (lastSeen[b] || 0))
+  const offlinePeerInfoList = []
+  for (const public_key of finalOffline) {
+    const alias = ca(pkToAlias[public_key]) || public_key.slice(0, 20)
+    const { countPeers, countDisabled } = await getPeersDisabledTowards({ public_key })
+    const percent = countPeers ? ((countDisabled / countPeers) * 100).toFixed(0) + '%' : ''
+    const daysOffline = lastSeen[public_key] ? daysAgo(lastSeen[public_key]).toFixed(1) + 'd' : ''
+    const isReallyOffline = daysOffline > 1 || (countPeers && countDisabled / countPeers > 0.33)
+    const icon = isReallyOffline ? '🚫' : '🕑'
+    offlinePeerInfoList.push(`${alias} ${icon} ${percent} ${daysOffline}`)
+  }
+  const offlinePeerInfo = offlinePeerInfoList.join('\n ') || 'n/a'
+
+  const message =
+    peers !== null
+      ? `🔍 Simple reconnect done (every ${MINUTES_BETWEEN_SIMPLE_RECONNECTS} minutes).\n\n` +
+        // give overall statistics on offline
+        `<b>Offline peers</b>: ${finalOffline.length}/${peersTotal}` +
+        ` (${((finalOffline.length / peersTotal) * 100).toFixed(0)}%)\n\n` +
+        // write out offline peers
+        ` ${offlinePeerInfo}\n\n` +
+        // write out overall statistics on reconnected
+        `<b>Reconnected peers</b>: ${finalReconnected.length}/${peersTotal}` +
+        ` (${((finalReconnected.length / peersTotal) * 100).toFixed(0)}%)\n\n` +
+        // write out reconnected peers
+        ` ${finalReconnected.map(pk => ca(pkToAlias[pk]) || pk.slice(0, 20)).join(', ') || 'n/a'}\n\n` +
+        `<b>Disabled-towards-me peers</b>: ${peersDisabledToMe.length}/${peersTotal}` +
+        ` (${((peersDisabledToMe.length / peersTotal) * 100).toFixed(0)}%)\n\n` +
+        // write out peers that disabled towards me
+        ` ${peersDisabledToMe.map(pk => ca(pkToAlias[pk]) || pk.slice(0, 20)).join(', ') || 'n/a'}\n`
+      : 'bos/lnd issue detected'
+
+  // update user about offline peers just in case
+  console.log(`${getDate()} ${message.replaceAll(/<\/?.>/g, '')}`)
+  await telegramLog(message)
 }
 
 // starts everything
@@ -379,7 +486,7 @@ const initialize = async () => {
 const runNodeRestartCheck = async () => {
   if (!(ALLOW_DAILY_RESET && ALLOW_NODE_RESET)) return null
 
-  console.boring(`${getDate()} runNodeRestartCheck()`)
+  logDim('runNodeRestartCheck()')
 
   const now = Date.now()
   const timers = mynode.timers
@@ -397,7 +504,7 @@ const runNodeRestartCheck = async () => {
   const isReseting = isRightHour && beenLongEnough
 
   // prettier-ignore
-  console.boring(`${getDate()} runNodeRestartCheck() ${isRightHour && beenLongEnough ? 'reseting node processes' : 'not right time'}
+  logDim(`runNodeRestartCheck() ${isRightHour && beenLongEnough ? 'reseting node processes' : 'not right time'}
     ${thisHour} UTC hour ${isRightHour ? 'matches' : 'is not'} the specified ${UTC_HOUR_FOR_RESTART} UTC hour for timed node reset.
     It has been ${hoursSinceReset > 24 * 2 ? 'over 2 days' : hoursSinceReset.toFixed(1) + ' hours'} since last known reset.
     It has been ${hoursSinceDailyReset > 24 * 2 ? 'over 2 days' : hoursSinceDailyReset.toFixed(1) + ' hours'} since last daily reset.
@@ -407,7 +514,7 @@ const runNodeRestartCheck = async () => {
   if (!isReseting) return null
 
   // seems time to restart node
-  console.boring(`${getDate()} runNodeRestartCheck() - right hour and been long enough so restarting node processes`)
+  logDim('runNodeRestartCheck() - right hour and been long enough so restarting node processes')
 
   // update timers
   updateBotTimers({ lastDailyReset: now })
@@ -458,7 +565,7 @@ const checkBattery = async () => {
   if (!ALLOW_NODE_SHUTDOWN_ON_LOW_BATTERY) return null
 
   const battery = await getBattery()
-  console.boring(`${getDate()} checkBattery(): ${battery + '%' || 'n/a'}`)
+  logDim(`checkBattery(): ${battery + '%' || 'n/a'}`)
 
   if (battery && +battery < 50) {
     console.log(`${getDate()} checkBattery(): battery below 50%`)
@@ -498,7 +605,7 @@ const checkBattery = async () => {
 
 // experimental parallel rebalancing function (unsplit, wip)
 const runBotRebalanceOrganizer = async () => {
-  console.boring(`${getDate()} runBotRebalanceOrganizer()`)
+  logDim('runBotRebalanceOrganizer()')
   // match up peers
   // high weight lets channels get to pick good peers first (not always to occasionally search for better matches)
 
@@ -827,7 +934,12 @@ const runBotRebalanceOrganizer = async () => {
             ` & completed! 🍾🥂🏆 ${dim}(${tasksDone}/${matchups.length} done after ${taskLength})${undim}`
         )
         // return matchedPair
-      } else if (run >= MAX_BALANCE_REPEATS && discount < 2) {
+      } else if (
+        // if reached max # of rebalances without a discount
+        (run >= MAX_REBALANCE_REPEATS && discount < 2) ||
+        // if reached max # of rebalances even with major discount
+        run >= MAX_REBALANCE_REPEATS_ANY
+      ) {
         // successful & stopping - at max repeats for minor discounts (< than 1/2 of attempted fee rate)
         matchedPair.done = true
         const tasksDone = matchups.reduce((count, m) => (m.done ? count + 1 : count), 0)
@@ -945,7 +1057,7 @@ const findGoodPeerMatch = ({ remoteChannel, peerOptions }) => {
 // gets peers info including using previous slow to generate snapshot data
 // can use await generatePeersSnapshots() instead to get fully updated stats for _all_ peers
 const runBotGetPeers = async ({ all = false } = {}) => {
-  console.boring(`${getDate()} runBotGetPeers()`)
+  logDim('runBotGetPeers()')
 
   // use bos peers command to get objects describing each peer with alias and pubkey
   const getPeers = all
@@ -954,7 +1066,7 @@ const runBotGetPeers = async ({ all = false } = {}) => {
 
   if (getPeers === null) {
     // only happens in event of bos error like if lnd not running
-    console.boring(`${getDate()} runBotGetPeers() got no response from bos peers`)
+    logDim('runBotGetPeers() got no response from bos peers')
     await runBotReconnect()
     sleep(60 * seconds)
     // retry again
@@ -1113,9 +1225,7 @@ const runBotReconnectCheck = async () => {
   // get list of all peers and active peers to check if enough are online
   const allPeers = await bos.peers({})
   if (!allPeers) {
-    console.boring(
-      `${getDate()} runBotReconnectCheck(): no valid response from bos peers, running runBotReconnect early`
-    )
+    logDim('runBotReconnectCheck(): no valid response from bos peers, running runBotReconnect early')
     await runBotReconnect()
     return null
   }
@@ -1125,7 +1235,7 @@ const runBotReconnectCheck = async () => {
   // const peers = await runBotGetPeers()
 
   // check if too many peers are offline
-  console.boring(`${getDate()} runBotReconnectCheck(): Offline peers: ${offlinePeers.length} / ${allPeers.length}`)
+  logDim(`runBotReconnectCheck(): Offline peers: ${offlinePeers.length} / ${allPeers.length}`)
 
   // if need emergency reconnect - running reconnect early regardless of timers!
   const isRunningEmergencyReconnect = offlinePeers.length / allPeers.length > mynode.offlineLimitPercentage / 100.0
@@ -1206,7 +1316,7 @@ const runCleaningCheck = async () => {
 
 // first backup payments to logs folder and then clear them
 const runCleaning = async () => {
-  console.boring(`${getDate()} runCleaning()`)
+  logDim('runCleaning()')
 
   const DAYS_FOR_STATS = 999 // how many days back to backup
 
@@ -1222,7 +1332,7 @@ const runCleaning = async () => {
 
 // logic for updating fees & max htlc sats size (v3)
 const updateFees = async () => {
-  console.boring(`${getDate()} updateFees() v3`)
+  logDim('updateFees() v3')
 
   if (!ADJUST_POLICIES) {
     console.log(`${getDate()} ADJUST_POLICIES=false so just simulating what it would've been`)
@@ -1248,8 +1358,8 @@ const updateFees = async () => {
       .map(v => pretty(v.max_htlc_mtokens / 1000))
       .join('|')
 
-    console.boring(
-      `${getDate()} ${ca(peer.alias).padEnd(30)} < ${pretty(MIN_CHAN_SIZE)} ` +
+    logDim(
+      `${ca(peer.alias).padEnd(30)} < ${pretty(MIN_CHAN_SIZE)} ` +
         'sats capacity setting so skipping fee adjustments, ' +
         `max htlc: ${byChannelHtlcString.padStart(11)}`
     )
@@ -1578,7 +1688,7 @@ const readRecord = publicKey => {
 // generate data to save to files for easier external browsing
 // returns peers info with maximum detail (content of _peers.json)
 const generatePeersSnapshots = async () => {
-  console.boring(`${getDate()} generatePeersSnapshots()`)
+  logDim('generatePeersSnapshots()')
   printMemoryUsage('(before snapshot)')
 
   // on-chain channel info switched to object with keys of channel "id" ("partner_public_key" inside)
@@ -1714,15 +1824,15 @@ const generatePeersSnapshots = async () => {
   const res = fs.readdirSync(LOG_FILES) || []
   const paymentLogFiles = res.filter(f => f.match(/_paymentHistory/))
   const isRecent = t => Date.now() - t < DAYS_FOR_STATS * days
-  VERBOSE && console.boring(`${getDate()} ${getPaymentEvents.length} payment records found in db`)
+  VERBOSE && logDim(`${getPaymentEvents.length} payment records found in db`)
   for (const fileName of paymentLogFiles) {
     const timestamp = fileName.split('_')[0]
     const useFile = isRecent(timestamp)
-    // console.boring(`${fileName} - is Recent? ${useFile}`) // say for each log file if used
+    // logDim(`${fileName} - is Recent? ${useFile}`) // say for each log file if used
     if (!useFile) continue // log file older than oldest needed record
     const payments = JSON.parse(fs.readFileSync(`${LOG_FILES}/${fileName}`))
     getPaymentEvents.push(...payments.filter(p => isRecent(p.created_at_ms)))
-    VERBOSE && console.boring(`${getDate()} ${getPaymentEvents.length} payment records used from log file`)
+    VERBOSE && logDim(`${getPaymentEvents.length} payment records used from log file`)
   }
 
   // get all received funds
@@ -2348,7 +2458,7 @@ const addDetailsFromSnapshot = peers => {
     const i = fromFilePeersIndex[p.public_key]
 
     if (i === undefined) {
-      console.boring(`${getDate()} ${p.public_key} ${p.alias} missing details pass`)
+      logDim(`${p.public_key} ${p.alias} missing details pass`)
       p.missing_details_pass = true
       continue // no point doing rest
     }
@@ -2402,7 +2512,7 @@ const getPeersDisabledTowards = async ({ public_key }) => {
 // 3. get updated complete peer info
 // 4. peers offline high = reset tor & rerun entire check after delay
 const runBotReconnect = async () => {
-  console.boring(`${getDate()} runBotReconnect()`)
+  logDim('runBotReconnect()')
 
   // check for basic internet connection
   const isInternetConnected = await dns.promises
@@ -2441,7 +2551,7 @@ const runBotReconnect = async () => {
   if (peers.length === 0) return console.warn('no peers')
 
   const peersDisabledToMe = peers.filter(p => p.is_inbound_disabled).length
-  const peersTotal = peers.length
+  const peersTotal = peers?.length
 
   const considerOffline = INCLUDE_RECONNECTED_IN_OFFLINE
     ? [...offline, ...reconnected] // peers.filter(p => p.is_offline)
@@ -2461,7 +2571,7 @@ const runBotReconnect = async () => {
     const alias = ca(p.alias)
     const { countPeers, countDisabled } = await getPeersDisabledTowards({ public_key: p.public_key })
     const percent = countPeers ? ((countDisabled / countPeers) * 100).toFixed(0) : 'n/a '
-    const daysOffline = lastSeen[p.public_key] ? '' + daysAgo(lastSeen[p.public_key]).toFixed(1) + 'd' : ''
+    const daysOffline = lastSeen[p.public_key] ? daysAgo(lastSeen[p.public_key]).toFixed(1) + 'd' : ''
     const isReallyOffline = daysOffline > 1 || (countPeers && countDisabled / countPeers > 0.33)
     const icon = isReallyOffline ? '🚫' : '🕑'
     offlinePeerInfoList.push(`${alias} ${icon} ${percent}% ${daysOffline}`)
@@ -2480,7 +2590,7 @@ const runBotReconnect = async () => {
       ` (${((reconnected.length / peersTotal) * 100).toFixed(0)}%)\n\n` +
       // write out reconnected peers
       ` ${reconnected.map(p => ca(p.alias)).join(', ') || 'n/a'}\n\n` +
-      `<b>Disabled towards me peers</b>: ${peersDisabledToMe}/${peersTotal}` +
+      `<b>Disabled-towards-me-peers</b>: ${peersDisabledToMe}/${peersTotal}` +
       ` (${((peersDisabledToMe / peersTotal) * 100).toFixed(0)}%)\n`
     : 'bos/lnd issue detected'
 
@@ -2586,6 +2696,7 @@ const hours = 60 * minutes
 const days = 24 * hours
 
 const daysAgo = ts => (Date.now() - ts) / days
+const minutesAgo = ts => (Date.now() - ts) / minutes
 
 const pretty = n => String(trunc(n || 0)).replace(/\B(?=(\d{3})+\b)/g, '_')
 
@@ -2594,10 +2705,12 @@ const getDay = () => new Date().toISOString().slice(0, 10)
 
 const fixJSON = (k, v) => (v === undefined ? null : v)
 
+const unique = arr => Array.from(new Set(arr))
+
 const isEmpty = obj => !!obj && Object.keys(obj).length === 0 && obj.constructor === Object
 const isNotEmpty = obj => !isEmpty(obj)
 
-console.boring = (...args) => console.log(`${dim}${args}${undim}`)
+const logDim = (...args) => console.log(`${getDate()} ${dim}${args.join(' ')}${undim}`)
 
 // rounds down to nearest power of 10
 // const floor10 = v => pow(10, floor(log10(v)))
@@ -2617,7 +2730,7 @@ const sizeMaxHTLC = peer => {
     const safeHTLC = min(ruleMaxHTLC, max(1, floor2(local_balance))) * 1000
     final[channel.id] = { max_htlc_mtokens: safeHTLC }
 
-    // console.boring(`  ${channel.id} max htlc safe size to be set to ${pretty(safeHTLC / 1000)} sats`)
+    // logDim(`  ${channel.id} max htlc safe size to be set to ${pretty(safeHTLC / 1000)} sats`)
 
     return final
   }, {})
@@ -2654,14 +2767,14 @@ const printMemoryUsage = text => {
   const externalString = (memUse.external / 1024 / 1024).toFixed(0)
   const rssString = (memUse.rss / 1024 / 1024).toFixed(0)
 
-  console.boring(
-    `${getDate()} Using ${totalString} heapTotal & ${usedString} MB heapUsed & ${externalString} MB external & ${rssString} MB resident set size. ${text}`
+  logDim(
+    `Using ${totalString} heapTotal & ${usedString} MB heapUsed & ${externalString} MB external & ${rssString} MB resident set size. ${text}`
   )
   return { ...memUse, usedString, totalString, externalString, rssString }
 }
 
 // clean alias from emoji & non standard characters
-const ca = alias => alias.replace(/[^\x00-\x7F]/g, '').trim() // .replace(/[\u{0080}-\u{10FFFF}]/gu,'');
+const ca = alias => (alias || '').replace(/[^\x00-\x7F]/g, '').trim() // .replace(/[\u{0080}-\u{10FFFF}]/gu,'');
 
 // console log colors
 const dim = '\x1b[2m'
