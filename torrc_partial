@@ -29,7 +29,7 @@ SocksTimeout 60
 
 # First hop node reuse
 UseEntryGuards 1
-NumEntryGuards 42
+NumEntryGuards 21
 
 # Other speed up methods people use
 ExcludeExitNodes {ru}
