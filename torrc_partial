@@ -1,0 +1,37 @@
+# DO NOT COPY EVERYTHING, IT WILL LIKELY BE DIFFERENT FOR YOUR INSTALL
+# JUST ADD/REMOVE SETTINGS YOU WANT WITHOUT CHANGING YOUR PORT NUMBERS
+# UNSURE WHAT HELPS WHAT DOESNT YET, NEED LND DEV TO COMMENT
+# Reference settings manual: https://2019.www.torproject.org/docs/tor-manual.html.en
+
+# ----------------------------------------------------------------------
+# AT START OF FILE:
+
+# Bind only to "10.21.21.11" which is the tor IP within the container
+SocksPort   10.21.21.11:9050 IsolateDestAddr KeepAliveIsolateSOCKSAuth IsolateSOCKSAuth
+# SocksPort   10.21.21.11:9050
+ControlPort 10.21.21.11:29051
+
+# ----------------------------------------------------------------------
+# AT END OF FILE
+
+LongLivedPorts 21, 22, 706, 1863, 5050, 5190, 5222, 5223, 6523, 6667, 6697, 8300, 9735, 9911
+
+# Circuits settings
+LearnCircuitBuildTimeout 1
+CircuitBuildTimeout 10
+CircuitStreamTimeout 59
+NewCircuitPeriod 11
+MaxCircuitDirtiness 14400
+MaxClientCircuitsPending 256
+KeepalivePeriod 61
+SocksTimeout 60
+
+# First hop node reuse
+UseEntryGuards 1
+NumEntryGuards 42
+
+# Other speed up methods people use
+ExcludeExitNodes {ru}
+HardwareAccel 1
+DisableAllSwap 1
+AvoidDiskWrites 1
