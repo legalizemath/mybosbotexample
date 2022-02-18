@@ -1,6 +1,11 @@
 # DO NOT COPY EVERYTHING, IT WILL LIKELY BE DIFFERENT FOR YOUR INSTALL
 # JUST ADD/REMOVE SETTINGS YOU WANT WITHOUT CHANGING YOUR PORT NUMBERS
 # UNSURE WHAT HELPS WHAT DOESNT YET, NEED LND DEV TO COMMENT
+
+# For umbrel to edit would be something like: nano ~/umbrel/tor/torrc
+# make backups, it will be wiped on updates likely
+# make backups, have to restart node to apply settings (sudo ~/umbrel/scripts/stop && sudo ~/umbrel/scripts/start)
+
 # Reference settings manual: https://2019.www.torproject.org/docs/tor-manual.html.en
 # also lnd.conf tor.streamisolation=1 for now sucks resulting in insane # of disconnects and should not be part of lnd.conf
 
