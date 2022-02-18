@@ -2,6 +2,7 @@
 # JUST ADD/REMOVE SETTINGS YOU WANT WITHOUT CHANGING YOUR PORT NUMBERS
 # UNSURE WHAT HELPS WHAT DOESNT YET, NEED LND DEV TO COMMENT
 # Reference settings manual: https://2019.www.torproject.org/docs/tor-manual.html.en
+# also lnd.conf tor.streamisolation=1 for now sucks resulting in insane # of disconnects and should not be part of lnd.conf
 
 # ----------------------------------------------------------------------
 # AT START OF FILE:
