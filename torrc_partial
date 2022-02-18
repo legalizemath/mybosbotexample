@@ -33,7 +33,7 @@ MaxClientCircuitsPending 256
 KeepalivePeriod 61
 SocksTimeout 60
 
-# First hop node reuse
+# First hop node reuse (default keeps using 1 node which can throttle, more is less private)
 UseEntryGuards 1
 NumEntryGuards 21
 
