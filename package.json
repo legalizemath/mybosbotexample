@@ -7,7 +7,7 @@
   "scripts": {
     "start": "npm run start-resetHandler && npm run start-bot",
     "start-bot": "npm link balanceofsatoshis && node --optimize_for_size --max_old_space_size=300 --expose-gc index.js",
-    "start-resetHandler": "sudo -b node resetHandler > /dev/null 2>&1 && sudo -k",
+    "start-resetHandler": "sudo -b node resetHandler > /dev/null 2>&1 && sudo -k"
   },
   "author": "",
   "license": "MIT license",
