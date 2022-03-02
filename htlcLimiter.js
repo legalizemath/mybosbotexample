@@ -2,6 +2,11 @@
 
 Limits # of htlcs in each channel
 
+What goal of this is:
+1. limit # of htlcs you might have to force close on per channel, minimizing cost from sweeping htlcs
+2. flooding channel require less htlcs to flood but also requires locking up a variety of fees for each channel on this hop
+3. rate limits htlc generation which rate limits growth of channel states in database
+
 Script periodically checks pending htlcs in channels and fee policy in channels.
 
 In parallel in watches for forwarding requests.
@@ -19,24 +24,25 @@ The rate of getChannels updates is rate at which granted request counts are clea
 
 */
 
+import fs from 'fs'
 import { subscribeToForwardRequests } from 'balanceofsatoshis/node_modules/ln-service/index.js'
 import bos from './bos.js'
+
 const { log2, floor, max } = Math
 const { stringify, parse } = JSON
-
-const seconds = 1000
+const seconds = 1000 // ms
 const minutes = 60 * seconds
 
 // settings
-const DEBUG = false
+const LOG_FILE_PATH = './logs' // where to store yyyy-mm-dd_htlcLimiter.log files
 const MAX_RAM_USE_MB = null // end process at _ MB usedHeap, set to null to disable
-const UPDATE_DELAY = 10 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
+const UPDATE_DELAY = 12 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
 const FEE_UPDATE_DELAY = 42 * minutes // ms between re-checking channel policies
 const LND_CHECK_DELAY = 2 * minutes // ms between retrying lnd if issue
 
 // fee group settings
 const MIN_ORDER_OF_MAGNITUDE = 0 // lowest 2^_ fee group possible (0 means all htlcs with fee rates below 1 sat are in same group)
-const ALLOWED_PER_GROUP_MIN = 2 // smallest amount of htlcs allowed per fee group
+const ALLOWED_PER_GROUP_MIN = 2 // smallest amount of htlcs allowed per fee group, overwrites even if ALLOWED_PER_GROUP_IN or ALLOWED_PER_GROUP_OUT is smaller
 const ALLOWED_PER_GROUP_IN = group => group // how many incoming htlcs allowed per fee group
 const ALLOWED_PER_GROUP_OUT = group => group + 1 // * 2 // how many outgoing htlcs allowed per fee group
 
@@ -45,10 +51,19 @@ const SATS_LIMIT = 10000 // can limit # of htlc below this size of sats unsettle
 const ALLOWED_BELOW_LIMIT_IN = 2 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of inward ones
 const ALLOWED_BELOW_LIMIT_OUT = 3 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of outward ones
 
+const DEBUG = false
+const PRINT_WHEN_HTLCS_RECOUNTED = false // show when UPDATE_DELAY based recount of htlcs happens
+
 // internal
-const limiterProcess = { stop: false } // process handler to prepare to stop node
 const byChannel = {}
-const node = { policies: {}, authed: null }
+const settings = {
+  policies: {}, // fee rates
+  auth: undefined, // auth object for re-use
+  showLogs: true, // print to stdout/terminal
+  fileLogs: true, // print to file
+  stop: false, // stop all htlcs
+  terminate: false // end limiter process
+}
 let pendingOtherCount = 0
 let pendingForwardCount = 0
 let outgoingCount = 0
@@ -61,31 +76,35 @@ const idToKey = {}
 const getGroup = sats => max(floor(log2(sats)), MIN_ORDER_OF_MAGNITUDE)
 
 // starts everything
-const initialize = async (showLogs = true) => {
-  showLogs && printout('started')
-  node.auth = await bos.initializeAuth()
+const initialize = async (showLogs = true, fileLogs = true, auth = undefined) => {
+  settings.showLogs = showLogs
+  settings.fileLogs = fileLogs
+
+  printout('started')
+  if (auth) settings.auth = await bos.initializeAuth({ providedAuth: auth })
+  if (!auth) settings.auth = await bos.initializeAuth()
 
   try {
     // will now be listening to events about forwarding requests
-    const subForwardRequests = subscribeToForwardRequests({ lnd: node.auth })
+    const subForwardRequests = subscribeToForwardRequests({ lnd: settings.auth })
     subForwardRequests.on('forward_request', f => decideOnForward({ f, showLogs }))
     // DEBUG && printout('new request', stringify({ ...forward, onion: undefined, hash: f.hash?.slice(0, 5) }, fixJSON))
 
     // starts infinite async loop of updating snapshots of in flight htlcs for all channels
     updatePendingCounts({ subForwardRequests, showLogs })
 
-    showLogs && printout('initialized')
-    return limiterProcess
+    printout('initialized')
+    return settings
   } catch (e) {
-    showLogs && printout(`could not subscribe to htlc requests, re-initializing in ${LND_CHECK_DELAY}`)
+    printout(`could not subscribe to htlc requests, re-initializing in ${LND_CHECK_DELAY}`)
     await sleep(LND_CHECK_DELAY)
-    return await initialize()
+    return await initialize(showLogs, fileLogs) // needs new auth, node likely restarted
   }
 }
 
 // decide to allow or block forward request
-const decideOnForward = ({ f, showLogs }) => {
-  if (limiterProcess.stop) return f.reject() // f.reject() // if stop all new forwards
+const decideOnForward = ({ f }) => {
+  if (settings.stop) return f.reject() // f.reject() // if stop all new forwards
 
   // gets fee rate group for this forward request
   const group = getGroup(getFee(f))
@@ -160,24 +179,29 @@ const decideOnForward = ({ f, showLogs }) => {
 
   const result = allowed ? f.accept() : f.reject()
 
-  showLogs && announce(f, allowed)
+  announce(f, allowed)
 
   return result // result
 }
 
 // loop that updates all channel unsettled tx counts & more rarely checks fee policy
-const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
+const updatePendingCounts = async ({ subForwardRequests }) => {
   // stop signal check
-  if (limiterProcess.stop) return printout('stop signal detected') // terminate loop
+  if (settings.stop) return printout('htlcLimiter stop signal detected') // terminate loop
+  // terminat signal check
+  if (settings.terminate) {
+    subForwardRequests.removeAllListeners()
+    return printout('htlcLimiter terminate signal detected') // terminate loop & stop listening for requests
+  }
 
   // occasionally update fee per channel data
   if (Date.now() - lastPolicyCheck > FEE_UPDATE_DELAY) {
     // clean up previous data & log ram use (rarely)
     global?.gc?.()
-    // showLogs && MAX_RAM_USE_MB && getMemoryUsage()
+    // MAX_RAM_USE_MB && getMemoryUsage()
 
     // fee rates in case any changed
-    const gotFeeRates = await bos.callAPI('getFeeRates', { auth: node.auth })
+    const gotFeeRates = await bos.callAPI('getFeeRates', { auth: settings.auth })
 
     if (gotFeeRates) {
       const feeRates = gotFeeRates.channels?.reduce((final, channel) => {
@@ -186,7 +210,7 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
       }, {})
 
       if (feeRates) {
-        node.policies = feeRates
+        settings.policies = feeRates
         // move up last fee rate policy timestamp
         lastPolicyCheck = Date.now()
 
@@ -205,10 +229,10 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
   const res = await bos.callAPI('getChannels')
   // if lnd issue, keep trying until fixed and then reinitialize
   if (!res) {
-    showLogs && printout(`lnd unavailable, retrying in ${LND_CHECK_DELAY} ms`)
+    printout(`lnd unavailable, retrying in ${LND_CHECK_DELAY} ms`)
     await sleep(LND_CHECK_DELAY)
     subForwardRequests.removeAllListeners()
-    initialize(showLogs)
+    initialize(settings.showLogs, settings.fileLogs)
     // stop looping updatePendingCounts
     return null
   }
@@ -231,14 +255,14 @@ const updatePendingCounts = async ({ subForwardRequests, showLogs }) => {
     }
   }
 
-  DEBUG && printout(`${channels.length} channels parsed`)
+  PRINT_WHEN_HTLCS_RECOUNTED && printout(`${channels.length} channels parsed`)
   if (DEBUG && MAX_RAM_USE_MB) getMemoryUsage()
 
   // console.log({ idToKey, keyToAlias })
   await sleep(UPDATE_DELAY)
 
   // loop
-  setImmediate(() => updatePendingCounts({ subForwardRequests, showLogs }))
+  setImmediate(() => updatePendingCounts({ subForwardRequests }))
 }
 
 const getSats = f => f.tokens // get sats routed
@@ -252,13 +276,13 @@ const getFee = (f, channelUpdate = false, foundId = null) => {
   if (f.is_forward) {
     const outgoingChannelId = f.out_channel ?? foundId
 
-    if (!node.policies[outgoingChannelId]) {
+    if (!settings.policies[outgoingChannelId]) {
       // DEBUG && printout('no policy found', stringify(f, fixJSON), `found in channel ${foundId}`, `using fee ${fee}`)
       return fee
     }
 
-    const fee_rate = node.policies[outgoingChannelId]?.fee_rate || 0
-    const base_fee = (+node.policies[outgoingChannelId]?.base_fee_mtokens || 0) / 1000
+    const fee_rate = settings.policies[outgoingChannelId]?.fee_rate || 0
+    const base_fee = (+settings.policies[outgoingChannelId]?.base_fee_mtokens || 0) / 1000
     fee = fee_rate * 1e-6 * f.tokens + base_fee
   }
 
@@ -284,17 +308,28 @@ const announce = (f, isAccepted) => {
     '->',
     f.out_channel.padEnd(15),
     stringify({ ...byChannel[f.out_channel], raw: undefined }),
-    limiterProcess.stop ? '(stopped)' : ''
+    settings.stop ? '(stopped)' : ''
   )
 }
 
 const sleep = async ms => await new Promise(resolve => setTimeout(resolve, ms))
 const getDate = timestamp => (timestamp ? new Date(timestamp) : new Date()).toISOString()
 const printout = (...args) => {
-  // print async when possible
-  setImmediate(() => {
-    process.stdout.write(`\x1b[2m${getDate()} htlcLimiter() ${args.join(' ')}\x1b[0m\n`)
-  })
+  if (settings.showLogs) {
+    // print async to terminal when possible
+    setImmediate(() => {
+      // dimmed text as it's going to spam
+      process.stdout.write(`\x1b[2m${getDate()} htlcLimiter() ${args.join(' ')}\x1b[0m\n`)
+    })
+  }
+  if (settings.fileLogs) {
+    // log to file when possible
+    setImmediate(() => {
+      const PATH = `${LOG_FILE_PATH}/${new Date().toISOString().slice(0, 10)}_htlcLimiter.log`
+      if (!fs.existsSync(LOG_FILE_PATH)) fs.mkdirSync(LOG_FILE_PATH, { recursive: true })
+      fs.appendFileSync(PATH, `${getDate()} htlcLimiter() ${args.join(' ')}\n`)
+    })
+  }
 }
 
 const getMemoryUsage = ({ quiet = false } = {}) => {
@@ -310,7 +345,7 @@ const getMemoryUsage = ({ quiet = false } = {}) => {
     )
   }
 
-  if (MAX_RAM_USE_MB && heapUsed > MAX_RAM_USE_MB) {
+  if (MAX_RAM_USE_MB && rss > MAX_RAM_USE_MB) {
     console.log(`${getDate()} htlcLimiter heapUsed hit memory limit of ${MAX_RAM_USE_MB} & terminating`)
     process.exit(1)
   }
