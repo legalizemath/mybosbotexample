@@ -35,10 +35,12 @@ const ALLOW_DAILY_RESET = true
 // const ALLOW_SHUTDOWN_ON_LOW_RAM = false
 
 // time to sleep between trying a bot cycle of above operations
-const MINUTES_BETWEEN_STEPS = 21
+const MINUTES_BETWEEN_STEPS = 11
 
 // print out acceptance/rejection of htlc requests
 const SHOW_HTLC_REQUESTS = false
+// store in log files htlc requests
+const LOG_HTLC_REQUESTS = true
 
 // memory handling
 const SHOW_RAM_USAGE = true
@@ -67,8 +69,8 @@ const MAX_PARALLEL_REBALANCES = 5
 // how far back to look for routing stats, must be longer than any other DAYS setting
 const DAYS_FOR_STATS = 7
 
-// hours between running bos reconnect (does some disable-based reconnections)
-const MINUTES_BETWEEN_RECONNECTS = 21.69 * 60 // offset from 24 hours to shift around when
+// hours between running bos reconnect (it disconnects/reconnects online peers that disable to me)
+const MINUTES_BETWEEN_BOS_RECONNECTS = 13.37 * 60 // offset from 24 hours to shift around when
 // hours between running basic offline/inactive reconnect
 const MINUTES_BETWEEN_SIMPLE_RECONNECTS = 69
 
@@ -117,9 +119,13 @@ const SAFETY_MARGIN_FLAT_MAX = 222 // 272 //
 // also time span of flow to look back at for deciding if and by how much to increase each fee rate
 const MINUTES_BETWEEN_FEE_CHANGES = 212
 // max size of fee adjustment upward
-const NUDGE_UP = 0.069
+const NUDGE_UP = 0.042
 // max size of fee adjustment downward
-const NUDGE_DOWN = 0.0021
+const NUDGE_DOWN_PER_DAY = 0.01337
+const NUDGE_DOWN = NUDGE_DOWN_PER_DAY / ((24 * 60) / MINUTES_BETWEEN_FEE_CHANGES) // 0.0021
+// increase NUDGE_DOWN by this factor when channel has never been seen routing out
+const NUDGE_DOWN_INACTIVE_MULTIPLIER = 2
+
 // how much ppm has to change by to warrant risking htlc fails by updating fee
 const FEE_CHANGE_TOLERANCE = 0.01
 
@@ -154,7 +160,7 @@ const MIN_MINUTES_BETWEEN_SAME_PAIR = (MINUTES_BETWEEN_STEPS + MINUTES_FOR_REBAL
 // max rebalance repeats while successful
 // if realized rebalance rate is > 1/2 max rebalance rate
 // this will just limit repeats when there's no major discounts
-const MAX_REBALANCE_REPEATS = 10 // without major discount
+const MAX_REBALANCE_REPEATS = 12 // without major discount
 const MAX_REBALANCE_REPEATS_ANY = 21 // with even discounts
 
 // ms to put between each rebalance launch for safety
@@ -207,6 +213,9 @@ const WEIGHT_REMOTE = peer => 0.5 * WEIGHT_OPTIONS.MIN_LIQUIDITY(peer) + 0.5 * W
 // experimental - fake small flowrate to be ready to expect
 // const MIN_FLOWRATE_PER_DAY = 10000 // sats/day
 
+// full path to db from /, can't use ~/
+const DB_PATH = '/home/umbrel/umbrel/lnd/data/graph/mainnet/channel.db'
+
 const SNAPSHOTS_PATH = './snapshots'
 const PEERS_LOG_PATH = './peers'
 const LOG_FILES = './logs'
@@ -237,37 +246,30 @@ const mynode = {
 const runBot = async () => {
   logDim('runBot()')
 
-  // clean up memory if gc exposed with --expose-gc
+  // force clean up memory if gc exposed with --expose-gc
   global?.gc?.()
   printMemoryUsage('(at start of runBot cycle)')
 
   // check battery
   await checkBattery()
-  await sleep(5 * seconds)
 
   // check if need to restart node
   await runNodeRestartCheck()
-  await sleep(5 * seconds)
 
   // check if time for bos reconnect
   await runBotReconnectCheck()
-  await sleep(5 * seconds)
 
   // check if time for updating fees
   await runUpdateFeesCheck()
-  await sleep(5 * seconds)
 
   // runCleaningCheck
   await runCleaningCheck()
-  await sleep(5 * seconds)
 
   // simple reconnect
   await runSimpleReconnect()
-  await sleep(5 * 1000)
 
   // do rebalancing
   await runBotRebalanceOrganizer()
-  // await sleep(5 * 1000)
 
   // long pause
   await sleep(MINUTES_BETWEEN_STEPS * minutes)
@@ -276,10 +278,127 @@ const runBot = async () => {
   runBot()
 }
 
+// starts everything
+const initialize = async () => {
+  // get authorized access to node
+  const auth = await bos.initializeAuth()
+
+  // get your own public key
+  const identity = await bos.callAPI('getIdentity')
+  if (!identity.public_key || identity.public_key.length < 10) {
+    console.log()
+    throw new Error('unknown public key for this node')
+  }
+  mynode.public_key = identity.public_key
+
+  const feeUpdatesPerDay = +((60 * 24) / MINUTES_BETWEEN_FEE_CHANGES).toFixed(1)
+
+  const feeRateInceaseString = (NUDGE_UP * 100).toFixed(2)
+  const feeRateDecreaseString = (NUDGE_DOWN * 100).toFixed(2)
+  const feeRateToleranceString = (FEE_CHANGE_TOLERANCE * 100).toFixed(0)
+
+  const maxUpFeeChangePerDay = ((1 + NUDGE_UP) ** feeUpdatesPerDay - 1) * 100
+  const maxDownFeeChangePerDay = (1 - (1 - NUDGE_DOWN) ** feeUpdatesPerDay) * 100
+
+  const hoursBetweenFeeChanges = (MINUTES_BETWEEN_FEE_CHANGES / 60).toFixed(1)
+
+  // roughly how many decreases to equal to an increase
+  const decreasesToUndo = ceil(NUDGE_UP / NUDGE_DOWN)
+  // how much time is that including 2 periods before decreases are allowed
+  const minutesToUndo = (decreasesToUndo + 2) * MINUTES_BETWEEN_FEE_CHANGES
+  const daysToUndoString = (minutesToUndo / 60 / 24).toFixed(1)
+
+  console.log(`${getDate()}
+  ========================================================
+
+    this node's public key:
+
+      "${mynode.public_key}"
+
+    There are a maximum of ${feeUpdatesPerDay} fee updates per day.
+
+    UP: Channel fee rate set-point increases by max of +${feeRateInceaseString}%
+      every ${hoursBetweenFeeChanges} hours or more
+      with higher if its outflow at that rate is closer to local sats per day.
+
+      At constant high outflow absolute max is +${maxUpFeeChangePerDay.toFixed(1)}% / day.
+
+    DOWN: Fee rate set-point decreases by max of -${feeRateDecreaseString}%
+      every ${hoursBetweenFeeChanges} hours or more
+      if no outflow took place in at least 2x as long of time.
+
+      Channel must also have more than ${pretty(MIN_SATS_PER_SIDE)} sats local
+        to allow decrease of fee rate or outflow numbers are unreliable.
+
+      At continous 0 outflow, max decrease per day is -${maxDownFeeChangePerDay.toFixed(1)}%.
+      If never logged as outflowing, decreasing rate is increased by factor of ${NUDGE_DOWN_INACTIVE_MULTIPLIER}x.
+
+    One high increase in fee rate takes ${daysToUndoString} days to undo with decreases.
+
+    Actual fee rate in policy is only updated when set-point is more
+      than ${feeRateToleranceString}% away from current policy fee rate.
+
+    If channel has under ${pretty(SATS_PER_SIDE_DRAINED_LIMIT)} sats local
+      it's also considered drained and policy fee rate is temporarily increased
+      to ${ROUTING_STOPPING_FEE_RATE} ppm to discorage additional routing.
+
+
+    IF THIS IS INCORRECT, ctrl + c
+
+  ========================================================
+  `)
+
+  // small pause for friendly stop
+  await sleep(5 * seconds)
+
+  // make folders for all the files I use
+  if (!fs.existsSync(PEERS_LOG_PATH)) {
+    fs.mkdirSync(PEERS_LOG_PATH, { recursive: true })
+  }
+  if (!fs.existsSync(SNAPSHOTS_PATH)) {
+    fs.mkdirSync(SNAPSHOTS_PATH, { recursive: true })
+  }
+  if (!fs.existsSync(LOG_FILES)) {
+    fs.mkdirSync(LOG_FILES, { recursive: true })
+  }
+
+  // load settings file
+  if (fs.existsSync(SETTINGS_PATH)) {
+    mynode.settings = JSON.parse(fs.readFileSync(SETTINGS_PATH))
+
+    // add to avoid list from there
+    if (mynode.settings?.avoid?.length) {
+      mynode.settings.avoid.forEach(pk => {
+        if (!pk.startsWith('//')) AVOID_LIST.push(pk)
+      })
+      console.log(`${getDate()}`, { AVOID_LIST })
+    }
+  }
+
+  // timers
+  initializeBotTimers()
+
+  // generate snapshots at start to ensure recent data
+  await generatePeersSnapshots()
+
+  // small pause for friendly stop
+  await sleep(5 * seconds)
+
+  // initialize forwarding request limiter if used
+  if (ALLOW_HTLC_LIMITER) mynode.htlcLimiter = htlcLimiter(SHOW_HTLC_REQUESTS, LOG_HTLC_REQUESTS, auth)
+
+  // start bot loop
+  runBot()
+}
+
 // my own reconnect method that doesn't disconnect channels based on just disables
 // so can run frequently without risking instability
 const runSimpleReconnect = async () => {
   if (!ALLOW_SIMPLE_RECONNECT) return null
+
+  logDim('runSimpleReconnect()')
+  await sleep(5 * seconds)
+
   const minutesSinceLast = minutesAgo(mynode.timers.lastSimpleReconnect || 0)
   if (minutesSinceLast > MINUTES_BETWEEN_SIMPLE_RECONNECTS) {
     logDim('runSimpleReconnect(): time to run')
@@ -370,123 +489,12 @@ const runSimpleReconnect = async () => {
   await telegramLog(message)
 }
 
-// starts everything
-const initialize = async () => {
-  // get authorized access to node
-  await bos.initializeAuth()
-
-  // get your own public key
-  const identity = await bos.callAPI('getIdentity')
-  if (!identity.public_key || identity.public_key.length < 10) {
-    console.log()
-    throw new Error('unknown public key for this node')
-  }
-  mynode.public_key = identity.public_key
-
-  const feeUpdatesPerDay = +((60 * 24) / MINUTES_BETWEEN_FEE_CHANGES).toFixed(1)
-
-  const feeRateInceaseString = (NUDGE_UP * 100).toFixed(2)
-  const feeRateDecreaseString = (NUDGE_DOWN * 100).toFixed(2)
-  const feeRateToleranceString = (FEE_CHANGE_TOLERANCE * 100).toFixed(0)
-
-  const maxUpFeeChangePerDay = ((1 + NUDGE_UP) ** feeUpdatesPerDay - 1) * 100
-  const maxDownFeeChangePerDay = (1 - (1 - NUDGE_DOWN) ** feeUpdatesPerDay) * 100
-
-  const hoursBetweenFeeChanges = (MINUTES_BETWEEN_FEE_CHANGES / 60).toFixed(1)
-
-  // roughly how many decreases to equal to an increase
-  const decreasesToUndo = ceil(NUDGE_UP / NUDGE_DOWN)
-  // how much time is that including 2 periods before decreases are allowed
-  const minutesToUndo = (decreasesToUndo + 2) * MINUTES_BETWEEN_FEE_CHANGES
-  const daysToUndoString = (minutesToUndo / 60 / 24).toFixed(1)
-
-  console.log(`${getDate()}
-  ========================================================
-
-    this node's public key:
-
-      "${mynode.public_key}"
-
-    There are a maximum of ${feeUpdatesPerDay} fee updates per day.
-
-    UP: Channel fee rate set-point increases by max of +${feeRateInceaseString}%
-      every ${hoursBetweenFeeChanges} hours or more
-      with higher if its outflow at that rate is closer to local sats per day.
-
-      (At constant high outflow absolute max is +${maxUpFeeChangePerDay.toFixed(1)}% / day.)
-
-    DOWN: Fee rate set-point decreases by max of -${feeRateDecreaseString}%
-      every ${hoursBetweenFeeChanges} hours or more
-      if no outflow took place in at least 2x as long of time.
-
-      Channel must also have more than ${pretty(MIN_SATS_PER_SIDE)} sats local
-        to allow decrease fee rate or outflow numbers are unreliable.
-
-      At continous 0 outflow, max decrease per day is -${maxDownFeeChangePerDay.toFixed(1)}%.
-
-    One high increase in fee rate takes ${daysToUndoString} days to undo with decreases.
-
-    Actual fee rate in policy is only updated when set-point is more
-      than ${feeRateToleranceString}% away from current policy fee rate.
-
-    If channel has under ${pretty(SATS_PER_SIDE_DRAINED_LIMIT)} sats local
-      it's also considered drained and policy fee rate is temporarily increased
-      to ${ROUTING_STOPPING_FEE_RATE} ppm to discorage additional routing.
-
-
-    IF THIS IS INCORRECT, ctrl + c
-
-  ========================================================
-  `)
-
-  // small pause for friendly stop
-  await sleep(5 * seconds)
-
-  // make folders for all the files I use
-  if (!fs.existsSync(PEERS_LOG_PATH)) {
-    fs.mkdirSync(PEERS_LOG_PATH, { recursive: true })
-  }
-  if (!fs.existsSync(SNAPSHOTS_PATH)) {
-    fs.mkdirSync(SNAPSHOTS_PATH, { recursive: true })
-  }
-  if (!fs.existsSync(LOG_FILES)) {
-    fs.mkdirSync(LOG_FILES, { recursive: true })
-  }
-
-  // load settings file
-  if (fs.existsSync(SETTINGS_PATH)) {
-    mynode.settings = JSON.parse(fs.readFileSync(SETTINGS_PATH))
-
-    // add to avoid list from there
-    if (mynode.settings?.avoid?.length) {
-      mynode.settings.avoid.forEach(pk => {
-        if (!pk.startsWith('//')) AVOID_LIST.push(pk)
-      })
-      console.log(`${getDate()}`, { AVOID_LIST })
-    }
-  }
-
-  // timers
-  initializeBotTimers()
-
-  // generate snapshots at start to ensure recent data
-  await generatePeersSnapshots()
-
-  // small pause for friendly stop
-  await sleep(5 * seconds)
-
-  // initialize forwarding request limiter if used
-  if (ALLOW_HTLC_LIMITER) mynode.htlcLimiter = htlcLimiter(SHOW_HTLC_REQUESTS)
-
-  // start bot loop
-  runBot()
-}
-
 // restart node if requested
 const runNodeRestartCheck = async () => {
   if (!(ALLOW_DAILY_RESET && ALLOW_NODE_RESET)) return null
 
   logDim('runNodeRestartCheck()')
+  await sleep(5 * seconds)
 
   const now = Date.now()
   const timers = mynode.timers
@@ -564,6 +572,9 @@ const updateBotTimers = newItems => {
 const checkBattery = async () => {
   if (!ALLOW_NODE_SHUTDOWN_ON_LOW_BATTERY) return null
 
+  logDim('checkBattery()')
+  await sleep(5 * seconds)
+
   const battery = await getBattery()
   logDim(`checkBattery(): ${battery + '%' || 'n/a'}`)
 
@@ -606,6 +617,8 @@ const checkBattery = async () => {
 // experimental parallel rebalancing function (unsplit, wip)
 const runBotRebalanceOrganizer = async () => {
   logDim('runBotRebalanceOrganizer()')
+  await sleep(5 * seconds)
+
   // match up peers
   // high weight lets channels get to pick good peers first (not always to occasionally search for better matches)
 
@@ -621,8 +634,8 @@ const runBotRebalanceOrganizer = async () => {
   // grab original number of peers for each side
   const [nRHP, nLHP] = [remoteHeavyPeers.length, localHeavyPeers.length]
 
-  /*
   // print out all options of peers & their weight
+  /*
   if (VERBOSE) {
     console.log(`${getDate()} Peer weight / balance / alias.   Weight function: ${WEIGHT}`)
     for (const p of localHeavyPeers) {
@@ -705,7 +718,7 @@ const runBotRebalanceOrganizer = async () => {
     // low levels of emergency will try less hard
     // high level of emergency will go as high as subtractSafety allows
     // fee via weights from 0.5-1x of reference ppm
-    const rateBasedOnEmergency = trunc((0.5 + 0.5 * levelOfEmergency) * feeRateUsedForCalc)
+    const rateBasedOnEmergency = trunc((0.33 + 0.67 * levelOfEmergency) * feeRateUsedForCalc)
 
     // use smallest of 3 rebalance fee rate limits
     const safeRate = min(rateBasedOnEmergency, safeRateBaseline, safeRateForAge)
@@ -956,6 +969,8 @@ const runBotRebalanceOrganizer = async () => {
             `rebalance succeeded for ${pretty(rebalanced)} sats @ ${resBalance.fee_rate} ppm ${yays}` +
             ` & moving onto run #${run + 1} ${dim}(${taskLength})${undim}`
         )
+        // need to rebalance drops off as we get closer to balanced so decreasing risk
+        matchedPair.maxRebalanceRate *= 0.98 // temporary, ideally eval the scores each pass in future
         return await handleRebalance(matchedPair)
       }
     }
@@ -1220,6 +1235,9 @@ const runBotReconnectCheck = async () => {
   const now = Date.now()
   const timers = mynode.timers
 
+  logDim('runBotReconnectCheck()')
+  await sleep(5 * seconds)
+
   // check if earlier reconnect is necessary
 
   // get list of all peers and active peers to check if enough are online
@@ -1253,12 +1271,12 @@ const runBotReconnectCheck = async () => {
   // now actually check for scheduled one
   const lastReconnect = timers.lastReconnect || 0
   const timeSince = now - lastReconnect
-  const isTimeForReconnect = timeSince > 1000 * 60 * MINUTES_BETWEEN_RECONNECTS
+  const isTimeForReconnect = timeSince > 1000 * 60 * MINUTES_BETWEEN_BOS_RECONNECTS
   const minutesSince = (timeSince / (1000.0 * 60)).toFixed(1)
   console.log(
     `${getDate()} runBotReconnectCheck(): ${
       isTimeForReconnect ? 'Time to run' : 'Skipping'
-    } BoS reconnect. (${MINUTES_BETWEEN_RECONNECTS} minutes timer)` +
+    } BoS reconnect. (${MINUTES_BETWEEN_BOS_RECONNECTS} minutes timer)` +
       ` Last run: ${lastReconnect === 0 ? 'never' : `${minutesSince} minutes ago at ${getDate(lastReconnect)}`}`
   )
   if (isTimeForReconnect) {
@@ -1271,6 +1289,9 @@ const runBotReconnectCheck = async () => {
 
 // fee update timer handling
 const runUpdateFeesCheck = async () => {
+  logDim('runUpdateFeesCheck()')
+  await sleep(5 * seconds)
+
   const now = Date.now()
   const timers = mynode.timers
   const lastFeeUpdate = timers.lastFeeUpdate || 0
@@ -1293,6 +1314,8 @@ const runUpdateFeesCheck = async () => {
 // database/payments cleaning timer handling
 const runCleaningCheck = async () => {
   if (!ALLOW_DB_CLEANUP) return null
+  logDim('runCleaningCheck()')
+  await sleep(5 * seconds)
 
   const now = Date.now()
   const timers = mynode.timers
@@ -1333,6 +1356,11 @@ const runCleaning = async () => {
 // logic for updating fees & max htlc sats size (v3)
 const updateFees = async () => {
   logDim('updateFees() v3')
+  const now = Date.now()
+
+  // doing 2 different type of policy updates
+  // for channels below MIN_CHAN_SIZE just changing max htlc size
+  // and then for rest of channels doing all updates
 
   if (!ADJUST_POLICIES) {
     console.log(`${getDate()} ADJUST_POLICIES=false so just simulating what it would've been`)
@@ -1341,7 +1369,7 @@ const updateFees = async () => {
   // generate brand new snapshots of peers with ALL the details (slow)
   const allPeers = await generatePeersSnapshots()
 
-  // SMALL CHANNELS - just htlc size
+  // - SMALL CHANNELS - just htlc size
 
   const smallPeers = allPeers.filter(
     p =>
@@ -1372,7 +1400,7 @@ const updateFees = async () => {
     }
   }
 
-  // NORMAL CHANNELS - adjust fees & max htlcs
+  // - NORMAL CHANNELS - adjust fees & max htlcs
   const peers = allPeers.filter(
     p =>
       !p.is_offline &&
@@ -1410,7 +1438,6 @@ const updateFees = async () => {
 
   for (const peer of peers) {
     // current stats
-    const now = Date.now()
     const ppmOld = peer.fee_rate // already getting this through getReferenceFee(peer)
 
     // if undefined or not a number or null peer channel is not in state to manage (channel likely closing/opening)
@@ -1477,6 +1504,11 @@ const updateFees = async () => {
     // measure rate of flow of sats out of local side of channel
     const outflow =
       forwardsSinceUpdate[peer.public_key]?.reduce((sum, fw) => fw.mtokens / 1000.0 / daysSinceLastChange + sum, 0) || 0
+
+    // check if ever logged as routing out (w/ timestamp), and if not we increase used NUDGE_DOWN rate by NUDGE_DOWN_INACTIVE_MULTIPLIER
+    const lastTimeSeenRoutingOut = logFileData?.lastTimeSeenRoutingOut ?? outflow > 0 ? now : undefined
+    const nudgeDownMultiplier = lastTimeSeenRoutingOut ? NUDGE_DOWN_INACTIVE_MULTIPLIER : 1
+
     // scale of outflow per day compared to refSatsOutflow based on forwards since last fee update
     // starts at 0 and ~1 when flow rate (extrapolated to per day) is on scale of half capacity
     const refSatsOutflow = peer.outbound_liquidity // less signficant increases if out liquidity large
@@ -1486,8 +1518,8 @@ const updateFees = async () => {
     // ppm is nudged here up or down and then rules are applied
     // if (isIncreasing) ppmNewFloat = ppmNewFloat * (1 + modifiedNudgeUp)
     // else if (isDecreasing) ppmNewFloat = trunc(ppmNewFloat * (1 - NUDGE_DOWN))
-    if (isIncreasing) ppmNewFloat = stepUpFee(ppmNewFloat, outflowFactor * NUDGE_UP)
-    else if (isDecreasing) ppmNewFloat = stepDownFee(ppmNewFloat, NUDGE_DOWN)
+    if (isIncreasing) ppmNewFloat = stepUpFee(ppmNewFloat, NUDGE_UP * outflowFactor)
+    else if (isDecreasing) ppmNewFloat = stepDownFee(ppmNewFloat, NUDGE_DOWN * nudgeDownMultiplier)
     ppmNewFloat = applyRules(ppmNewFloat)
     const ppmNewFloatTrunc = trunc(ppmNewFloat)
 
@@ -1574,6 +1606,7 @@ const updateFees = async () => {
         appendRecord({
           peer,
           newRecordData: {
+            lastTimeSeenRoutingOut, // records last time, if ever, seen routing out
             ppmFloat: ppmNewFloat, // this will be ppm used next update if available
             feeChanges: [
               {
@@ -1628,7 +1661,7 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }, log = fal
   // read from old file if exists
   let oldRecord = {}
   try {
-    oldRecord = JSON.parse(fs.readFileSync(fullPath))
+    oldRecord = { ...JSON.parse(fs.readFileSync(fullPath)) }
   } catch (e) {
     log && console.log(`${getDate()} no previous ${fullPath} record detected`)
   }
@@ -1648,6 +1681,7 @@ const appendRecord = ({ peer, newRecordData = {}, newRebalance = {} }, log = fal
   const ppmWorked = median(combinedRebalanceData.filter(b => b.failed === false).map(b => b.ppm)).o
 
   // remove old data in future or weight higher recent data
+  // (eventually want to remove data older than X months as it's outdated)
 
   // update just this peers file
   const newFileData = {
@@ -2143,12 +2177,24 @@ const generatePeersSnapshots = async () => {
 
   const memoryUsed = printMemoryUsage()
 
-  peers.forEach(p => {
-    // add this experimental flow rate calc (temp)
-    // calculateFlowRateMargin(p)
-    // calculate weight for each peer
-    p.rndWeight = WEIGHT(p)
-  })
+  const getDbSize = async () => {
+    try {
+      const fileStat = await fs.promises.stat(DB_PATH)
+      return (fileStat.size / 1024 / 1024).toFixed(1)
+    } catch (e) {
+      return '?'
+    }
+  }
+  const dbSize = await getDbSize()
+
+  const channelsDiskSize = peers.reduce((t, p) => t + (p.est_disk_usage_mb || 0), 0)?.toFixed(1)
+
+  // peers.forEach(p => {
+  //   // add this experimental flow rate calc (temp)
+  //   // calculateFlowRateMargin(p)
+  //   // calculate weight for each peer
+  //   p.rndWeight = WEIGHT(p)
+  // })
 
   // prettier-ignore
   const nodeSummary = `${getDate()}
@@ -2238,7 +2284,11 @@ const generatePeersSnapshots = async () => {
     : ''
 }
   -------------------------------------------------------------
-    script RAM usage:                 ${memoryUsed?.rssString} MB resident set size
+  SYSTEM
+
+    script RAM use                    ${memoryUsed?.rssString} MB resident set size
+    channels.db size                  ${pretty(dbSize)} MB
+    channel states size est.          ${pretty(channelsDiskSize)} MB
   `
   /*
                                       ${(os.freemem() / 1024 / 1024).toFixed(0)} MB free system memory
@@ -2425,6 +2475,8 @@ spent: ${pretty(totalRebalanceFees + totalChainFees)}
 net: ${pretty(totalProfit)}
 routing rewards: ${median(forwardsAll.map(f => f.fee_mtokens / 1000.0), { pr: 1 }).s}
 memory used: ${memoryUsed?.rssString} MB
+db size: ${pretty(dbSize)} MB
+channel states size est: ${pretty(channelsDiskSize)} MB
 `
 
   await telegramLog(message)
@@ -2480,7 +2532,7 @@ const addDetailsFromSnapshot = peers => {
     p.capacity = p.capacity ?? fromFilePeers[i]?.capacity ?? p.totalSats
 
     // add weight
-    p.rndWeight = WEIGHT(p)
+    // p.rndWeight = WEIGHT(p)
 
     // individual channel info
     p.ids = fromFilePeers[i]?.ids || []
@@ -2553,9 +2605,7 @@ const runBotReconnect = async () => {
   const peersDisabledToMe = peers.filter(p => p.is_inbound_disabled).length
   const peersTotal = peers?.length
 
-  const considerOffline = INCLUDE_RECONNECTED_IN_OFFLINE
-    ? [...offline, ...reconnected] // peers.filter(p => p.is_offline)
-    : offline
+  const considerOffline = INCLUDE_RECONNECTED_IN_OFFLINE ? [...offline, ...reconnected] : offline
   const majorError = peers === null
 
   // make a list of offline peer aliases and % of peers that disabled towards them according to graph
@@ -2579,7 +2629,7 @@ const runBotReconnect = async () => {
   const offlinePeerInfo = offlinePeerInfoList.join('\n ') || 'n/a'
 
   const message = !majorError
-    ? `🍳 BoS reconnect done (every ${MINUTES_BETWEEN_RECONNECTS} minutes).\n\n` +
+    ? `🍳 BoS reconnect done (every ${MINUTES_BETWEEN_BOS_RECONNECTS} minutes).\n\n` +
       // give overall statistics on offline
       `<b>Offline peers</b>: ${offline.length}/${peersTotal}` +
       ` (${((offline.length / peersTotal) * 100).toFixed(0)}%)\n\n` +
@@ -2698,7 +2748,7 @@ const days = 24 * hours
 const daysAgo = ts => (Date.now() - ts) / days
 const minutesAgo = ts => (Date.now() - ts) / minutes
 
-const pretty = n => String(trunc(n || 0)).replace(/\B(?=(\d{3})+\b)/g, '_')
+const pretty = n => String(trunc(+n || 0)).replace(/\B(?=(\d{3})+\b)/g, '_')
 
 const getDate = timestamp => (timestamp !== undefined ? new Date(timestamp) : new Date()).toISOString()
 const getDay = () => new Date().toISOString().slice(0, 10)
