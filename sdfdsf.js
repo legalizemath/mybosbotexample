@@ -1506,8 +1506,7 @@ const updateFees = async () => {
       forwardsSinceUpdate[peer.public_key]?.reduce((sum, fw) => fw.mtokens / 1000.0 / daysSinceLastChange + sum, 0) || 0
 
     // check if ever logged as routing out (w/ timestamp), and if not we increase used NUDGE_DOWN rate by NUDGE_DOWN_INACTIVE_MULTIPLIER
-    const lastTimeSeenRoutingOut =
-      logFileData?.lastTimeSeenRoutingOut ?? outflow > 0 ? now : logFileData?.lastTimeSeenRoutingOut
+    const lastTimeSeenRoutingOut = outflow > 0 ? now : logFileData?.lastTimeSeenRoutingOut
     const nudgeDownMultiplier = !lastTimeSeenRoutingOut ? NUDGE_DOWN_INACTIVE_MULTIPLIER : 1
 
     // scale of outflow per day compared to refSatsOutflow based on forwards since last fee update
