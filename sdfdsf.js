@@ -1087,7 +1087,7 @@ const runBotGetPeers = async ({ all = false } = {}) => {
     // only happens in event of bos error like if lnd not running
     logDim('runBotGetPeers() got no response from bos peers')
     await runBotReconnect()
-    sleep(60 * seconds)
+    await sleep(60 * seconds)
     // retry again
     return await runBotGetPeers({ all })
   }
