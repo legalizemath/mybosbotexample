@@ -287,7 +287,7 @@ const send = async (
     message = undefined, // string to send (reveals sender when used)
     // retryAvoidsOnTimeout = 0
     avoid = [],
-    isRebalance = true, // double checks in/out peers specified to avoid using same for both
+    isRebalance = false, // double checks in/out peers specified to avoid using same for both
     is_omitting_message_from = false, // old default to include your key in messages
     retryAvoidsOnTimeout = 0
   },
@@ -318,7 +318,7 @@ const send = async (
     log?.details && logDim(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
 
     if (fromChannel === toChannel && toChannel !== undefined) throw new Error('fromChannel same as toChannel')
-    if (isRebalance && !(fromChannel && toChannel)) throw new Error('need to specify from and to channels')
+    if (isRebalance && !(fromChannel && toChannel)) throw new Error('need to specify both "from" and "to" channels')
 
     const res = await bosPushPayment({
       lnd: authed ?? (await mylnd()),
@@ -439,6 +439,10 @@ const send = async (
     }
   }
 }
+// more accurate name as option
+const keysend = send
+// keysend specifically for rebalances so regular easier to use for actual sends
+const keysendRebalance = (choices, logging, isRetry) => send({ ...choices, isRebalance: true }, logging, isRetry)
 
 // returns new set fee
 const setFees = async (peerPubKey, fee_rate, log = false) => {
@@ -536,12 +540,13 @@ const peers = async (
       omit: [], // required
       ...choices
     })
-    const foundPeers = res.peers
-      // convert fee rate to just ppm
-      .map(peer => ({
-        ...peer,
-        inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)[1]
-      }))
+    const foundPeers =
+      res?.peers
+        // convert fee rate to just ppm
+        ?.map(peer => ({
+          ...peer,
+          inbound_fee_rate: +peer.inbound_fee_rate?.match(/\((.*)\)/)?.[1] || null
+        })) || null
 
     log && console.log(`${getDate()} bos.peers()`, JSON.stringify(peers, fixJSON, 2))
     return foundPeers
@@ -1269,12 +1274,15 @@ const initializeAuth = async (
 
     const height = await callAPI('getHeight') // does it know blockchain info
     if (!height) throw new Error('node not ready (getHeight failed)')
+    sleep(100)
 
     const pk = await callAPI('getIdentity') // does it know its own identity
     if (!pk) throw new Error('node not ready (getIdentity failed)')
+    sleep(100)
 
     const currentPeers = await peers({}) // does it know its peers
     if (!currentPeers) throw new Error('node not ready (bos peers failed)')
+    sleep(100)
 
     // if none of those errored out, consider authorized
 
@@ -1362,6 +1370,8 @@ const bos = {
   rebalance,
   reconnect,
   send,
+  keysend,
+  keysendRebalance,
   forwards,
   getFeesChart,
   getChainFeesChart,
