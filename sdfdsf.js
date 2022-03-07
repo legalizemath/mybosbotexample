@@ -126,8 +126,9 @@ const NUDGE_DOWN = NUDGE_DOWN_PER_DAY / ((24 * 60) / MINUTES_BETWEEN_FEE_CHANGES
 // increase NUDGE_DOWN by this factor when channel has never been seen routing out
 const NUDGE_DOWN_INACTIVE_MULTIPLIER = 2
 
-// how much ppm has to change by to warrant risking htlc fails by updating fee
-const FEE_CHANGE_TOLERANCE = 0.01
+// how much internal ppm setpoint has to change by to update what public sees as new fee rate
+const FEE_CHANGE_TOLERANCE_FRACTION = 0.21 // by this fraction
+const FEE_CHANGE_TOLERANCE_FLAT = 21 // or by this flat amount in ppm
 
 // min days of no routing activity before allowing reduction in fees
 const DAYS_FOR_FEE_REDUCTION = 0.25
@@ -162,6 +163,8 @@ const MIN_MINUTES_BETWEEN_SAME_PAIR = (MINUTES_BETWEEN_STEPS + MINUTES_FOR_REBAL
 // this will just limit repeats when there's no major discounts
 const MAX_REBALANCE_REPEATS = 12 // without major discount
 const MAX_REBALANCE_REPEATS_ANY = 21 // with even discounts
+// multiply max ppm rate after each rebalance for repeats by this
+const REPEAT_MAX_RATE_RATIO = 0.98
 
 // ms to put between each rebalance launch for safety
 const STAGGERED_LAUNCH_MS = 1111
@@ -295,7 +298,8 @@ const initialize = async () => {
 
   const feeRateInceaseString = (NUDGE_UP * 100).toFixed(2)
   const feeRateDecreaseString = (NUDGE_DOWN * 100).toFixed(2)
-  const feeRateToleranceString = (FEE_CHANGE_TOLERANCE * 100).toFixed(0)
+  const feeRateToleranceString = (FEE_CHANGE_TOLERANCE_FRACTION * 100).toFixed(0)
+  const feeRateToleranceFlatString = (FEE_CHANGE_TOLERANCE_FLAT * 100).toFixed(0)
 
   const maxUpFeeChangePerDay = ((1 + NUDGE_UP) ** feeUpdatesPerDay - 1) * 100
   const maxDownFeeChangePerDay = (1 - (1 - NUDGE_DOWN) ** feeUpdatesPerDay) * 100
@@ -335,8 +339,8 @@ const initialize = async () => {
 
     One high increase in fee rate takes ${daysToUndoString} days to undo with decreases.
 
-    Actual fee rate in policy is only updated when set-point is more
-      than ${feeRateToleranceString}% away from current policy fee rate.
+    Actual fee rate in policy is only updated when internal set-point is more
+      than ${feeRateToleranceString}% or ${feeRateToleranceFlatString} ppm away from current public policy fee rate.
 
     If channel has under ${pretty(SATS_PER_SIDE_DRAINED_LIMIT)} sats local
       it's also considered drained and policy fee rate is temporarily increased
@@ -867,7 +871,7 @@ const runBotRebalanceOrganizer = async () => {
           // {} // no terminal output, too many things happening
           { details: SHOW_REBALANCE_LOG }
         )
-      : await bos.send(
+      : await bos.keysendRebalance(
           {
             destination: mynode.public_key,
             fromChannel: localHeavy.public_key,
@@ -876,8 +880,8 @@ const runBotRebalanceOrganizer = async () => {
             sats: maxSatsToRebalanceAfterRules,
             maxMinutes: MINUTES_FOR_KEYSEND,
             maxFeeRate: maxRebalanceRate,
-            retryAvoidsOnTimeout: RETRIES_ON_TIMEOUTS_SEND,
-            avoid: copy(AVOID_LIST) // avoid these nodes in paths
+            avoid: copy(AVOID_LIST), // avoid these nodes in paths
+            retryAvoidsOnTimeout: RETRIES_ON_TIMEOUTS_SEND
           },
           // {} // no terminal output, too many things happening
           { details: SHOW_REBALANCE_LOG }
@@ -970,7 +974,7 @@ const runBotRebalanceOrganizer = async () => {
             ` & moving onto run #${run + 1} ${dim}(${taskLength})${undim}`
         )
         // need to rebalance drops off as we get closer to balanced so decreasing risk
-        matchedPair.maxRebalanceRate *= 0.98 // temporary, ideally eval the scores each pass in future
+        matchedPair.maxRebalanceRate = trunc(REPEAT_MAX_RATE_RATIO * matchedPair.maxRebalanceRate) // temporary, ideally eval the scores each pass in future
         return await handleRebalance(matchedPair)
       }
     }
@@ -1276,7 +1280,7 @@ const runBotReconnectCheck = async () => {
   console.log(
     `${getDate()} runBotReconnectCheck(): ${
       isTimeForReconnect ? 'Time to run' : 'Skipping'
-    } BoS reconnect. (${MINUTES_BETWEEN_BOS_RECONNECTS} minutes timer)` +
+    } BoS reconnect. (${MINUTES_BETWEEN_BOS_RECONNECTS.toFixed(1)} minutes timer)` +
       ` Last run: ${lastReconnect === 0 ? 'never' : `${minutesSince} minutes ago at ${getDate(lastReconnect)}`}`
   )
   if (isTimeForReconnect) {
@@ -1301,7 +1305,7 @@ const runUpdateFeesCheck = async () => {
   console.log(
     `${getDate()} ${
       isTimeForFeeUpdate ? 'Time to run' : 'Skipping'
-    } fee/channel gossiped updates. (${MINUTES_BETWEEN_FEE_CHANGES} minutes timer)` +
+    } fee/channel gossiped updates. (${MINUTES_BETWEEN_FEE_CHANGES.toFixed(1)} minutes timer)` +
       ` Last run: ${lastFeeUpdate === 0 ? 'never' : `${minutesSince} minutes ago at ${getDate(lastFeeUpdate)}`}`
   )
   if (isTimeForFeeUpdate) {
@@ -1491,21 +1495,22 @@ const updateFees = async () => {
 
     // check record for float ppm, if available and matches current ppm, use float
     // otherwise just uses current ppm
-    const ppmRecord = getReferenceFee(peer)
-    if (ppmRecord === null) continue // was some issue with getting fee rate
+    const ppmRecordFloat = getReferenceFee(peer)
+    if (ppmRecordFloat === null) continue // was some issue with getting fee rate (both log file & gossiped)
 
-    // let ppmNewFloat = ppmRecord && trunc(ppmRecord) === ppmOld ? ppmRecord : ppmOld
+    // let ppmNewFloat = ppmRecordFloat && trunc(ppmRecordFloat) === ppmOld ? ppmRecordFloat : ppmOld
 
     // starting point is current fee rate
     // will have to change fee rates using settings.json file
     // on other hand, opening more channels at some fee rate won't reset current fee rate for all
-    let ppmNewFloat = ppmRecord
+    let ppmNewFloat = ppmRecordFloat
 
     // measure rate of flow of sats out of local side of channel
     const outflow =
       forwardsSinceUpdate[peer.public_key]?.reduce((sum, fw) => fw.mtokens / 1000.0 / daysSinceLastChange + sum, 0) || 0
 
-    // check if ever logged as routing out (w/ timestamp), and if not we increase used NUDGE_DOWN rate by NUDGE_DOWN_INACTIVE_MULTIPLIER
+    // check if we saw this channel routing out since last update or ever in the past
+    // if not we increase used NUDGE_DOWN rate by NUDGE_DOWN_INACTIVE_MULTIPLIER
     const lastTimeSeenRoutingOut = outflow > 0 ? now : logFileData?.lastTimeSeenRoutingOut
     const nudgeDownMultiplier = !lastTimeSeenRoutingOut ? NUDGE_DOWN_INACTIVE_MULTIPLIER : 1
 
@@ -1524,12 +1529,21 @@ const updateFees = async () => {
     const ppmNewFloatTrunc = trunc(ppmNewFloat)
 
     // check if actual increase or decrease is necessary post changes & rules
-    // isIncreasing = ppmNewFloatTrunc > trunc(ppmRecord)
-    // isDecreasing = ppmNewFloatTrunc < trunc(ppmRecord)
+    // isIncreasing = ppmNewFloatTrunc > trunc(ppmRecordFloat)
+    // isDecreasing = ppmNewFloatTrunc < trunc(ppmRecordFloat)
 
-    // re-check if truncated fee changes are bigger than FEE_CHANGE_TOLERANCE
-    isIncreasing = trunc(ppmNewFloat) > trunc(ppmOld * (1 + FEE_CHANGE_TOLERANCE))
-    isDecreasing = trunc(ppmNewFloat) < trunc(ppmOld * (1 - FEE_CHANGE_TOLERANCE))
+    // re-check if truncated fee changes are bigger than FEE_CHANGE_TOLERANCE_FRACTION
+    // left side is what fee rate would be based on new calculated ppmNewFloat
+    // right side is how far away it has to be to outgrow minimum tolerance for changes
+    // e.g. downward we want it to decrease if % change is high enough -21% (helps small values drop) _OR_ if delta e.g. -21 ppm (helps large values drop)
+    // e.g. upward we want it to increase if % change is high enough e.g. +21% (helps small values rise) _OR_ if delta e.g. +21ppm (helps large values rise)
+
+    isIncreasing =
+      trunc(ppmNewFloat) > ppmOld * (1 + FEE_CHANGE_TOLERANCE_FRACTION) ||
+      trunc(ppmNewFloat) > ppmOld + FEE_CHANGE_TOLERANCE_FLAT
+    isDecreasing =
+      trunc(ppmNewFloat) < ppmOld * (1 - FEE_CHANGE_TOLERANCE_FRACTION) ||
+      trunc(ppmNewFloat) < ppmOld - FEE_CHANGE_TOLERANCE_FLAT
 
     // get the rest of channel policies figured out
     const localSats = ((peer.outbound_liquidity / 1e6).toFixed(1) + 'M').padStart(6)
@@ -1548,26 +1562,29 @@ const updateFees = async () => {
     const outflowString = outflow ? `${pretty(outflow).padStart(10)} sats/day` : ''
 
     const hasUsedChanged = isIncreasing || isDecreasing
-    const hasTargetChanged = ppmNewFloat.toFixed(3) !== ppmRecord.toFixed(3)
-    const targetChangePercent = hasTargetChanged ? +(((ppmNewFloat - ppmRecord) / ppmRecord) * 100).toFixed(2) : 0
+    const hasTargetChanged = ppmNewFloat.toFixed(3) !== ppmRecordFloat.toFixed(3)
+    const targetChangePercent = hasTargetChanged
+      ? +(((ppmNewFloat - ppmRecordFloat) / ppmRecordFloat) * 100).toFixed(2)
+      : 0
 
     // to print fees actually seen on gossip before and after
     // prettier-ignore
     const ppmActualFees = `${ppmOld.toFixed(0).padStart(5)} ${hasUsedChanged ? '->' : '  '} ${appliedFeeRate.toFixed(0).padEnd(6)}`
     // to print floating set points used ideally
     // prettier-ignore
-    const ppmSetPoints = `${ppmRecord.toFixed(3).padStart(9)} ${hasTargetChanged ? '->' : '  '} ${ppmNewFloat.toFixed(3).padEnd(10)}`
+    const ppmSetPoints = `${ppmRecordFloat.toFixed(3).padStart(9)} ${hasTargetChanged ? '->' : '  '} ${ppmNewFloat.toFixed(3).padEnd(10)}`
 
-    // console.log({ targetChangePercent, hasTargetChanged, ppmNewFloat, ppmRecord })
+    // console.log({ targetChangePercent, hasTargetChanged, ppmNewFloat, ppmRecordFloat })
     // assemble warnings
     const notes = [
-      `max-htlc: ${byChannelHtlcString}`,
+      `max-htlc: ${byChannelHtlcString}`.padEnd(20),
       hasTargetChanged ? `${targetChangePercent.toFixed(3).padStart(8)}%` : ''.padStart(9),
-      isIncreasing ? '🔼-ppm' : '',
-      isDecreasing ? '🔻-ppm' : '',
+      isIncreasing ? '🔼-UP' : '',
+      isDecreasing ? '🔻-DOWN' : '',
       isVeryRemoteHeavy(peer) ? '💤-VRH' : '',
-      isDrained(peer) ? `⛔-BLOCK ${ROUTING_STOPPING_FEE_RATE}ppm` : '',
-      outflowString
+      isDrained(peer) ? `⛔-${ROUTING_STOPPING_FEE_RATE}ppm` : '',
+      !lastTimeSeenRoutingOut ? '❄-NEW' : '', // when ppm drop is faster for channels never seen routing out
+      outflowString // average flowrate out
     ].join(' ')
 
     // update counts
@@ -1616,7 +1633,7 @@ const updateFees = async () => {
                 ppmFloat: ppmNewFloat, // fee set-point floating pt target
                 // for ppm vs Fout data
                 ppm_old: ppmOld, // old fee used on channel
-                ppmFloat_old: ppmRecord, // old set-point floating reference ppm
+                ppmFloat_old: ppmRecordFloat, // old set-point floating reference ppm
                 routed_out_msats: peer.routed_out_msats,
                 daysNoRouting: +flowOutRecentDaysAgo.toFixed(1)
               },
@@ -2712,7 +2729,7 @@ const restartNodeProcess = async (attempt = 1) => {
 const addSafety = ppm => trunc(min(ppm * SAFETY_MARGIN + 1, ppm + SAFETY_MARGIN_FLAT_MAX))
 const subtractSafety = ppm => trunc(max((ppm - 1) / SAFETY_MARGIN, ppm - SAFETY_MARGIN_FLAT_MAX, 0))
 
-// result offset via "+ nudge * 100" should help lift ppm from 0 & scale with nudge
+// result offset via "+ nudge * 100" should help lift ppm from 0 & scale with nudge, 1% nudge => multiply ppm by 1.01 + 1
 const stepUpFee = (ppm, nudge) => ppm * (1 + nudge) + nudge * 100
 // trunc will speed up moves down to at least -1ppm
 const stepDownFee = (ppm, nudge) => trunc(ppm * (1 - nudge))
