@@ -3,42 +3,40 @@
 
 # UNSURE WHAT HELPS WHAT DOESNT YET, NEED LND DEV TO COMMENT
 
-# For umbrel to edit would be something like: nano ~/umbrel/tor/torrc
+# For umbrel to edit would be something like: nano ~/umbrel/tor/torrc-proxy
 # make backups, it will be wiped on updates likely
 # make backups, have to restart node to apply settings (sudo ~/umbrel/scripts/stop && sudo ~/umbrel/scripts/start)
 
 # Reference settings manual: https://2019.www.torproject.org/docs/tor-manual.html.en
 # also lnd.conf tor.streamisolation=1 for now sucks resulting in insane # of disconnects and should not be part of lnd.conf
 
-# ----------------------------------------------------------------------
-# AT START OF FILE:
+# SafeLogging 0 # uncomment to show urls/ips in log files
 
-# Bind only to "10.21.21.11" which is the tor IP within the container
+# local ip will be different for different setups, here was umbrel docker setup, can be 0.0.0.0
 SocksPort   10.21.21.11:9050 IsolateDestAddr KeepAliveIsolateSOCKSAuth IsolateSOCKSAuth
-# SocksPort   10.21.21.11:9050
-ControlPort 10.21.21.11:29051
-
-# ----------------------------------------------------------------------
-# AT END OF FILE
 
 LongLivedPorts 21, 22, 706, 1863, 5050, 5190, 5222, 5223, 6523, 6667, 6697, 8300, 9735, 9911
 
-# Circuits settings
-LearnCircuitBuildTimeout 1
-CircuitBuildTimeout 124
-CircuitStreamTimeout 122
-NewCircuitPeriod 61
-MaxCircuitDirtiness 14400
-MaxClientCircuitsPending 256
-KeepalivePeriod 63
-SocksTimeout 121
+# Circuits settings, 
+# with many channels I had to slow down on making new circuits to avoid getting temp banned
+# all time units are in seconds
+LearnCircuitBuildTimeout 1      # default: 1      learn timeout over time
+CircuitBuildTimeout 124         # default: 60     how long to try building of a circuit or give up 
+CircuitStreamTimeout 122        # default: 0      how long until we try a new circuit if connection sucks
+NewCircuitPeriod 61             # default: 30     how often to consider making new circuits
+MaxCircuitDirtiness 14400       # default: 600    caps how long circuit used for, from last time used if KeepAliveIsolateSOCKSAuth, otherwise from first
+MaxClientCircuitsPending 256    # default: 32     higher makes your onion hidden services easier to reach
+KeepalivePeriod 63              # default: 300    how often data sent to keep connection awake
+SocksTimeout 121                # default: 120    how soon socks connection gets timed out
 
-# First hop node reuse (default keeps using 1 node which can throttle, more is less private)
-UseEntryGuards 1
+# First hop node reuse
+# default keeps using 1 node which can throttle
+# more is less private bc if same operator runs entry and exit node, can id your traffic
+UseEntryGuards 1                # default: 1      keep using same entry guard node(s) for very long time
 NumEntryGuards 21
 
 # Other speed up methods people use
 # ExcludeExitNodes {ru}
 HardwareAccel 1
-# DisableAllSwap 1
+# DisableAllSwap 1  # needs root
 AvoidDiskWrites 1
