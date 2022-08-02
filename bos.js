@@ -477,7 +477,7 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // instead of bos.callAPI('getChannels', { is_public: true })
 // can also do bos.lnService.getChannels({ is_public: true })
 // null on error
-const callAPI = async (method, choices = {}, log = true) => {
+const callAPI = async (method, choices = {}, log = false) => {
   try {
     // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
     [['getpeers', 'getPeers']].forEach(r => { if (r[0] === method) method = r[1] })
