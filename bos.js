@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   Needs node v14+, check: node -v, using v16.13.2
-  Installed/updated with `npm i -g balanceofsatoshis@12.13.4`
+  Installed/updated with `npm i -g balanceofsatoshis@12.16.3`
   Global install linked locally via `npm link balanceofsatoshis`
 
   It's unofficial independent wrapper so if anything changes this can break.
@@ -477,8 +477,10 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
 // instead of bos.callAPI('getChannels', { is_public: true })
 // can also do bos.lnService.getChannels({ is_public: true })
 // null on error
-const callAPI = async (method, choices = {}, log = false) => {
+const callAPI = async (method, choices = {}, log = true) => {
   try {
+    // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
+    [['getpeers', 'getPeers']].forEach(r => { if (r[0] === method) method = r[1] })
     log && logDim(`${getDate()} lnService.${method}()`)
     if (!(method in lnService)) throw new Error(`method ${method} doesn't exist in lnService`)
     const res = await lnService[method]({
