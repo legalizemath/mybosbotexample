@@ -1,11 +1,18 @@
 /*
   Wrapper for balanceofsatoshis installed globally
   Needs node v14+, check: node -v, using v16.13.2
-  Installed/updated with `npm i -g balanceofsatoshis@11.51.0`
+  Installed/updated with `npm i -g balanceofsatoshis@12.13.4`
   Global install linked locally via `npm link balanceofsatoshis`
+
+  It's unofficial independent wrapper so if anything changes this can break.
+  (e.g. changes in ln-service or bos functions, parameter names, output)
+  I just add wrappers here on need-to basis and some parts become abandoned.
 */
 
-import { fetchRequest, callRawApi } from 'balanceofsatoshis/commands/index.js'
+import {
+  fetchRequest
+  // callRawApi
+} from 'balanceofsatoshis/commands/index.js'
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
 import lnd from 'balanceofsatoshis/lnd/index.js'
@@ -464,24 +471,31 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
   }
 }
 
-// bos call api commands to lnd
-// bos call getIdentity - get my pub key
-// bos call getChannels - on-chain channel info
-// bos call getNode { public_key, is_omitting_channels: false } - both fees, max/min htlc, updated_at, is_disabled, cltv_delta
-// bos call getFeeRates - has base fee info (via channel or tx ids, not pubkeys)
-// bos call updateRoutingFees - MUST set every value or it is set to default (https://github.com/alexbosworth/ln-service#updateroutingfees)
-// bos call getForwards - forwarding events, choices: either {limit: 5} or {token: `{"offset":10,"limit":5}`}
-// bos call getpeers - contains networking data like bytes sent/received/socket
-// names for methods and choices for arguments via `bos call` or here
-// https://github.com/alexbosworth/ln-service
-// https://github.com/alexbosworth/balanceofsatoshis/blob/master/commands/api.json
-// 'cltv_delta' can just be found in getChannel and getNode, not getChannels, not getFeeRates
-// ^ is set in updateRoutingFees
-// 'max_htlc_mtokens' and 'min_htlc_mtokens' in getChannel and getChannels (@ local_, remote_) and getNode, not getFeeRates
-// ^ updated just in updateRoutingFees
-// 'base_fee_mtokens' in getChannel and getFeeRates and getNode, not getChannels
-// ^ updated in updateRoutingFees
+// just calls lnService directly using bos authorization
+// get method spelling, options, and expected output here:
+// https://github.com/alexbosworth/ln-service/blob/master/README.md#all-methods
+// instead of bos.callAPI('getChannels', { is_public: true })
+// can also do bos.lnService.getChannels({ is_public: true })
+// null on error
 const callAPI = async (method, choices = {}, log = false) => {
+  try {
+    log && logDim(`${getDate()} lnService.${method}()`)
+    if (!(method in lnService)) throw new Error(`method ${method} doesn't exist in lnService`)
+    const res = await lnService[method]({
+      lnd: authed ?? (await mylnd()),
+      ...choices
+    })
+    return copy(res) || {}
+    // empty object if nothing good yet without caught errors
+  } catch (e) {
+    logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted:`, e?.message)
+    return null
+  }
+}
+
+// basically old ln-service through bos, replaced with direct calls
+/*
+const callAPI_OLD = async (method, choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.callAPI(${method})`)
     const res = await callRawApi({
@@ -497,6 +511,7 @@ const callAPI = async (method, choices = {}, log = false) => {
     return null
   }
 }
+*/
 const call = callAPI
 
 const find = async (query, log = false) => {
@@ -1099,11 +1114,11 @@ const callPay = async (choices, log = false) => {
       pathfinding_timeout: trunc(maxMinutes * 60 * 1000),
       ...options
     }
-    log && console.log(`${getDate()} bos.call.pay(${JSON.stringify({ ...finalParams, lnd: undefined }, null, 2)})`)
+    log && console.log(`${getDate()} bos.callPay(${JSON.stringify({ ...finalParams, lnd: undefined }, null, 2)})`)
 
     const res = await lnService.pay(finalParams)
 
-    log && console.log(`${getDate()} bos.call.pay() complete`, res)
+    log && console.log(`${getDate()} bos.callPay() complete`, res)
     return res
   } catch (e) {
     console.error(`\n${getDate()} bos.call.pay() aborted:`, e?.message)
