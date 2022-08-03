@@ -16,7 +16,7 @@ import {
 import fetch from 'balanceofsatoshis/node_modules/@alexbosworth/node-fetch/lib/index.js'
 import { readFile } from 'fs'
 import lnd from 'balanceofsatoshis/lnd/index.js'
-import lnService from 'balanceofsatoshis/node_modules/ln-service/index.js'
+import lnServiceRaw from 'balanceofsatoshis/node_modules/ln-service/index.js'
 
 import {
   adjustFees as bosAdjustFees,
@@ -471,11 +471,26 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
   }
 }
 
+// helpful wrapper to re-use bos auth if not provided
+const lnServiceWrapped = {}
+for (const cmd in lnServiceRaw) {
+  lnServiceWrapped[cmd] = async (arg1, ...otherArgs) => {
+    // if lnd auth was provided use it, otherwise try using bos one
+    if (typeof arg1 === 'object' && 'lnd' in arg1) {
+      return await lnServiceRaw[cmd](arg1, ...otherArgs)
+    } else {
+      arg1 = { ...arg1, lnd: authed ?? (await mylnd()) }
+      return await lnServiceRaw[cmd](arg1, ...otherArgs)
+    }
+  }
+}
+const lnService = lnServiceWrapped
+
 // just calls lnService directly using bos authorization
 // get method spelling, options, and expected output here:
 // https://github.com/alexbosworth/ln-service/blob/master/README.md#all-methods
 // instead of bos.callAPI('getChannels', { is_public: true })
-// can also do bos.lnService.getChannels({ is_public: true })
+// can also do bos.lnService.getChannels({ lnd, is_public: true })
 // null on error
 const callAPI = async (method, choices = {}, log = false) => {
   try {
@@ -483,7 +498,7 @@ const callAPI = async (method, choices = {}, log = false) => {
     [['getpeers', 'getPeers']].forEach(r => { if (r[0] === method) method = r[1] })
     log && logDim(`${getDate()} lnService.${method}()`)
     if (!(method in lnService)) throw new Error(`method ${method} doesn't exist in lnService`)
-    const res = await lnService[method]({
+    const res = await lnServiceRaw[method]({
       lnd: authed ?? (await mylnd()),
       ...choices
     })
@@ -1073,7 +1088,7 @@ const setPeerPolicy = async (newPolicy, log = false) => {
   }
 }
 
-// bos call pay
+// my bos call pay
 const callPay = async (choices, log = false) => {
   log && logDim(`${getDate()} bos.call.pay() with ${JSON.stringify(choices)}`)
   const {
@@ -1100,7 +1115,7 @@ const callPay = async (choices, log = false) => {
     // use smaller of constraints for fee
     const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
     if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
-    const effectiveMaxFee = maxFee ?? ceil(0.1 * tokens) // 10% as fallback if unspecified
+    const effectiveMaxFee = maxFee ?? ceil(0.1 * tokens) // max of 1 satoshi or 10% of sats sent as max fee
     const effectiveMaxFeeRate = maxFeeRate ?? trunc(((1.0 * maxFee) / tokens) * 1e6)
     const maxFeeUsed = min(effectiveMaxFee, ceil((tokens * effectiveMaxFeeRate) / 1e6))
 
@@ -1405,6 +1420,8 @@ const bos = {
   initializeAuth,
   callPay,
   lnService,
+  lnServiceRaw,
+  lnServiceWrapped,
   getIdToPublicKeyTable,
   getPublicKeyToAliasTable,
   getIdToAliasTable,
