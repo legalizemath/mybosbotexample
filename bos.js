@@ -478,18 +478,22 @@ const lnServiceWrapped = {}
 for (const cmd in lnServiceRaw) {
   lnServiceWrapped[cmd] = async (arg1, ...otherArgs) => {
     try {
-    // if lnd auth was provided use it, otherwise try using bos one
-    if (typeof arg1 === 'object' && 'lnd' in arg1) {
-      return (await lnServiceRaw[cmd](arg1, ...otherArgs)) || {}
-    } else {
-      arg1 = { ...arg1, lnd: authed ?? (await mylnd()) }
-      return (await lnServiceRaw[cmd](arg1, ...otherArgs)) || {}
+      // if lnd auth was provided use it, otherwise try using bos one
+      if (typeof arg1 === 'object' && 'lnd' in arg1) {
+        return (await lnServiceRaw[cmd](arg1, ...otherArgs)) || {}
+      } else {
+        const arg1_mod = { ...arg1, lnd: authed ?? (await mylnd()) }
+        return (await lnServiceRaw[cmd](arg1_mod, ...otherArgs)) || {}
+      }
+    } catch (e) {
+      const argsUsed = [
+        { ...arg1, lnd: undefined },
+        ...otherArgs
+      ]
+      logDim(`${getDate()} wrapped lnService.${cmd}${JSON.stringify(argsUsed)} aborted.`, e?.message)
+      if (!e?.message) console.error(e)
+      return null
     }
-  } catch (e) {
-    logDim(`${getDate()} wrapped lnService.${cmd}(${JSON.stringify([{ ...arg1, lnd: undefined }, ...otherArgs])}) aborted.`, e?.message)
-    if (!e?.message) console.error(e)
-    return null
-  }
   }
 }
 const lnService = lnServiceWrapped
@@ -503,7 +507,9 @@ const lnService = lnServiceWrapped
 const callAPI = async (method, choices = {}, log = false) => {
   try {
     // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
-    [['getpeers', 'getPeers']].forEach(r => { if (r[0] === method) method = r[1] })
+    [['getpeers', 'getPeers']].forEach(r => {
+      if (r[0] === method) method = r[1]
+    })
     log && logDim(`${getDate()} lnService.${method}()`)
     // handle bad calls
     if (!(method in lnService)) throw new Error(`method ${method} doesn't exist in lnService`)
@@ -515,6 +521,7 @@ const callAPI = async (method, choices = {}, log = false) => {
     // empty object if nothing good yet without caught errors
   } catch (e) {
     logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted.`, e?.message)
+    if (!e?.message) console.error(e)
     return null
   }
 }
@@ -1098,7 +1105,7 @@ const callPay = async (choices, log = false) => {
   }
 
   try {
-    const parsedInvoice = lnService.parsePaymentRequest({ request: invoice })
+    const parsedInvoice = lnServiceRaw.parsePaymentRequest({ request: invoice })
     const { tokens } = parsedInvoice
 
     // use smaller of constraints for fee
@@ -1122,7 +1129,7 @@ const callPay = async (choices, log = false) => {
     }
     log && console.log(`${getDate()} bos.callPay(${JSON.stringify({ ...finalParams, lnd: undefined }, null, 2)})`)
 
-    const res = await lnService.pay(finalParams)
+    const res = await lnServiceRaw.pay(finalParams)
 
     log && console.log(`${getDate()} bos.callPay() complete`, res)
     return res
@@ -1189,7 +1196,7 @@ const getRemoteDisabledCount = async ({ public_key }) => {
 const removePeer = async ({ public_key }, log = false) => {
   log && logDim(`${getDate()} bos.removePeer(${JSON.stringify({ public_key })}) `)
   try {
-    const res = await lnService.removePeer({
+    const res = await lnServiceRaw.removePeer({
       lnd: authed ?? (await mylnd()),
       public_key
     })
@@ -1253,7 +1260,7 @@ const addPeer = async (choices, log = false) => {
       log &&
         logDim(`${getDate()} bos.addPeer(${shortKey}): ` + `trying socket ${i + 1}/${sockets.length}: ${sockets[i]}`)
       try {
-        const res = await lnService.addPeer({
+        const res = await lnServiceRaw.addPeer({
           lnd: authed ?? (await mylnd()),
           public_key,
           socket: sockets[i],
