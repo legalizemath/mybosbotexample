@@ -69,7 +69,7 @@ const getDetailedBalance = async (choices = {}, log = false) => {
 
     return removeStyling(res)
   } catch (e) {
-    console.error(`\n${getDate()} bos.getDetailedBalance() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.getDetailedBalance() aborted.`, e?.message)
     return {}
   }
 }
@@ -90,7 +90,7 @@ const getFeesPaid = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesPaid() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesPaid() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.getFeesPaid() aborted.`, e?.message)
     return {}
   }
 }
@@ -110,7 +110,7 @@ const getFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesChart() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.getFeesChart() aborted.`, e?.message)
     return {}
   }
 }
@@ -147,7 +147,7 @@ const getChainFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getChainFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getChainFeesChart() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.getChainFeesChart() aborted.`, e?.message)
     return { data: [] }
   }
 }
@@ -166,7 +166,7 @@ const forwards = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.forwards() complete`, res)
     return res.peers
   } catch (e) {
-    console.error(`\n${getDate()} bos.forwards() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.forwards() aborted.`, e?.message)
     return []
   }
 }
@@ -180,7 +180,7 @@ const reconnect = async (log = false) => {
     log && console.log(`${getDate()} bos.reconnect() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.reconnect() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.reconnect() aborted.`, e?.message)
   }
 }
 
@@ -234,7 +234,7 @@ const rebalance = async (
     // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted:`, e?.message)
+    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted.`, e?.message)
 
     // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
     if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
@@ -359,7 +359,7 @@ const send = async (
     */
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.send() aborted:`, e?.message)
+    log?.details && console.error(`\n${getDate()} bos.send() aborted.`, e?.message)
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
 
@@ -466,22 +466,30 @@ const setFees = async (peerPubKey, fee_rate, log = false) => {
     log && console.log(`${getDate()} bos.setFees()`, JSON.stringify(res), newFee)
     return +newFee
   } catch (e) {
-    console.error(`${getDate()} bos.setFees() aborted:`, e)
+    console.error(`${getDate()} bos.setFees() aborted.`, e)
     return {}
   }
 }
 
 // helpful wrapper to re-use bos auth if not provided
+// also handle errors via try/catch
+// returns null on error, otherwise response || empty object
 const lnServiceWrapped = {}
 for (const cmd in lnServiceRaw) {
   lnServiceWrapped[cmd] = async (arg1, ...otherArgs) => {
+    try {
     // if lnd auth was provided use it, otherwise try using bos one
     if (typeof arg1 === 'object' && 'lnd' in arg1) {
-      return await lnServiceRaw[cmd](arg1, ...otherArgs)
+      return (await lnServiceRaw[cmd](arg1, ...otherArgs)) || {}
     } else {
       arg1 = { ...arg1, lnd: authed ?? (await mylnd()) }
-      return await lnServiceRaw[cmd](arg1, ...otherArgs)
+      return (await lnServiceRaw[cmd](arg1, ...otherArgs)) || {}
     }
+  } catch (e) {
+    logDim(`${getDate()} wrapped lnService.${cmd}(${JSON.stringify([{ ...arg1, lnd: undefined }, ...otherArgs])}) aborted.`, e?.message)
+    if (!e?.message) console.error(e)
+    return null
+  }
   }
 }
 const lnService = lnServiceWrapped
@@ -497,38 +505,19 @@ const callAPI = async (method, choices = {}, log = false) => {
     // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
     [['getpeers', 'getPeers']].forEach(r => { if (r[0] === method) method = r[1] })
     log && logDim(`${getDate()} lnService.${method}()`)
+    // handle bad calls
     if (!(method in lnService)) throw new Error(`method ${method} doesn't exist in lnService`)
     const res = await lnServiceRaw[method]({
       lnd: authed ?? (await mylnd()),
       ...choices
     })
-    return copy(res) || {}
+    return res || {}
     // empty object if nothing good yet without caught errors
   } catch (e) {
-    logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted:`, e?.message)
+    logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted.`, e?.message)
     return null
   }
 }
-
-// basically old ln-service through bos, replaced with direct calls
-/*
-const callAPI_OLD = async (method, choices = {}, log = false) => {
-  try {
-    log && logDim(`${getDate()} bos.callAPI(${method})`)
-    const res = await callRawApi({
-      lnd: authed ?? (await mylnd()),
-      method,
-      ask: (u, cbk) => cbk(null, choices),
-      logger: logger(log)
-    })
-    return copy(res) || {}
-    // empty object if nothing good yet without caught errors
-  } catch (e) {
-    logDim(`${getDate()} bos.callAPI('${method}', ${JSON.stringify(choices)}) aborted:`, e?.message)
-    return null
-  }
-}
-*/
 const call = callAPI
 
 const find = async (query, log = false) => {
@@ -539,7 +528,7 @@ const find = async (query, log = false) => {
       query
     })
   } catch (e) {
-    console.error(`${getDate()} bos.find('${query}') aborted:`, e)
+    console.error(`${getDate()} bos.find('${query}') aborted.`, e)
     return null
   }
 }
@@ -603,7 +592,7 @@ const peers = async (
     }
     */
   } catch (e) {
-    console.error(`${getDate()} bos.peers() aborted:`, e)
+    console.error(`${getDate()} bos.peers() aborted.`, e)
     return null
   }
 }
@@ -632,7 +621,7 @@ const getFees = async (log = false) => {
 
     return myFees
   } catch (e) {
-    console.error(`${getDate()} bos.getFees() aborted:`, e)
+    console.error(`${getDate()} bos.getFees() aborted.`, e)
     return null
   }
 }
@@ -646,7 +635,7 @@ const getNodeFromGraph = async ({ public_key, is_omitting_channels = true }, log
     const res = await callAPI('getNode', { public_key, is_omitting_channels })
     return res
   } catch (e) {
-    console.error(`${getDate()} bos.getNodeFromGraph() aborted:`, e)
+    console.error(`${getDate()} bos.getNodeFromGraph() aborted.`, e)
     return null
   }
 }
@@ -667,7 +656,7 @@ const sayWithTelegramBot = async ({ token, chat_id, message, parse_mode = 'HTML'
     log && logDim(`${getDate()} bos.sayWithTelegramBot() result:`, JSON.stringify(fullResponse, null, 2))
     return fullResponse
   } catch (e) {
-    console.error(`${getDate()} bos.sayWithTelegramBot() aborted:`, e)
+    console.error(`${getDate()} bos.sayWithTelegramBot() aborted.`, e)
     return null
   }
 }
@@ -1138,7 +1127,7 @@ const callPay = async (choices, log = false) => {
     log && console.log(`${getDate()} bos.callPay() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.call.pay() aborted:`, e?.message)
+    console.error(`\n${getDate()} bos.call.pay() aborted.`, e?.message)
     return null
   }
 }
@@ -1283,7 +1272,7 @@ const addPeer = async (choices, log = false) => {
     // every socket must have failed
     throw new Error(`${public_key} failed to connect on all sockets (${sockets.length})`)
   } catch (e) {
-    log && logDim(`${getDate()} bos.addPeer(${shortKey}) aborted`, e?.message)
+    log && logDim(`${getDate()} bos.addPeer(${shortKey}) aborted.`, e?.message)
     return null
   }
 }
@@ -1363,7 +1352,7 @@ const logger = log => ({
   error: v => (log?.details ? console.error(getDate(), v) : log?.progress ? process.stdout.write('!') : null)
 })
 
-const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
+// const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
 
 const logDim = (...args) => setImmediate(() => console.log(`\x1b[2m${args.join(' ')}\x1b[0m`))
 
