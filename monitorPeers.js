@@ -13,8 +13,10 @@ const LOG_FILE_PATH = 'events.log'
 const WHEN_LOG_FAILED_HTLCS = forward =>
   // must have reason or no point displaying
   (forward.external_failure || forward.internal_failure) &&
-  // no probes
+  // potential probe? so canceled rather than fails
   forward.internal_failure !== 'UNKNOWN_INVOICE'
+// potential probe? so canceled rather than fails
+// forward.internal_failure !== 'INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS'
 
 // shows forwards that confirm
 const LOG_SUCCESSFUL_FORWARDS = false
@@ -122,7 +124,7 @@ const run = async () => {
     if (f.is_failed) {
       // this checks rule on which forwards to show
       if (WHEN_LOG_FAILED_HTLCS(f)) {
-        const msg = [`🚨 forwarding failure: ${from} -> ${to} of ${amt} for ${fee}`]
+        const msg = [`🚨 forward failure: ${from} -> ${to} of ${amt} for ${fee}`]
 
         if (f.internal_failure && f.internal_failure !== 'NO_DETAIL') {
           msg.push(`    💩 internal failure: ${f.internal_failure}`)
@@ -140,17 +142,18 @@ const run = async () => {
     // done: success
     if (f.is_confirmed) {
       if (LOG_SUCCESSFUL_FORWARDS) {
-        log(`⚡ forwarding success: ${from} -> ${to} of ${amt} for ${fee}`)
+        log(`⚡ forward success: ${from} -> ${to} of ${amt} for ${fee}`)
       }
 
       delete pastForwardEvents[fid] // clear up memory
       return null
     }
 
-    // uresolved forwards with defined path
-    // if (f.in_channel && f.out_channel) {
-    //   log(`🕐 forwarding pending: ${from} -> ${to} of ${amt} for ${fee}`)
-    // }
+    // unresolved forwards with defined path
+    if (f.in_channel && f.out_channel) {
+      log(`🕐 forward pending: ${from} -> ${to} of ${amt} for ${fee}`)
+      // console.log(f)
+    }
 
     // just in case too many fids in memory clean it all up above some limit
     if (Object.keys(pastForwardEvents).length >= 555) {
@@ -167,7 +170,7 @@ const run = async () => {
 }
 const log = (...args) =>
   setImmediate(() => {
-    const msg = [getDate(), ...args, '\n'].join(' ')
+    const msg = [getDate(), ...args].join(' ') // , '\n'
     console.log(msg)
     fs.appendFileSync(LOG_FILE_PATH, msg + '\n')
   })
@@ -178,3 +181,32 @@ const pretty = (n, L = 0) => {
 }
 
 run()
+
+/*
+https://github.com/lightningnetwork/lnd/blob/master/lnrpc/routerrpc/router.proto#L651
+enum FailureDetail {
+    UNKNOWN = 0;
+    NO_DETAIL = 1;
+    ONION_DECODE = 2;
+    LINK_NOT_ELIGIBLE = 3;
+    ON_CHAIN_TIMEOUT = 4;
+    HTLC_EXCEEDS_MAX = 5;
+    INSUFFICIENT_BALANCE = 6;
+    INCOMPLETE_FORWARD = 7;
+    HTLC_ADD_FAILED = 8;
+    FORWARDS_DISABLED = 9;
+    INVOICE_CANCELED = 10;
+    INVOICE_UNDERPAID = 11;
+    INVOICE_EXPIRY_TOO_SOON = 12;
+    INVOICE_NOT_OPEN = 13;
+    MPP_INVOICE_TIMEOUT = 14;
+    ADDRESS_MISMATCH = 15;
+    SET_TOTAL_MISMATCH = 16;
+    SET_TOTAL_TOO_LOW = 17;
+    SET_OVERPAID = 18;
+    UNKNOWN_INVOICE = 19;
+    INVALID_KEYSEND = 20;
+    MPP_IN_PROGRESS = 21;
+    CIRCULAR_ROUTE = 22;
+}
+*/
