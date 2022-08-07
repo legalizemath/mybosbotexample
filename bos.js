@@ -28,7 +28,10 @@ import {
 // import { rebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
 import { manageRebalance as bosRebalance } from 'balanceofsatoshis/swaps/index.js'
 
-import { getDetailedBalance as bosGetDetailedBalance } from 'balanceofsatoshis/balances/index.js'
+import {
+  getDetailedBalance as bosGetDetailedBalance,
+  getBalance as bosGetBalance
+} from 'balanceofsatoshis/balances/index.js'
 
 import {
   pushPayment as bosPushPayment,
@@ -37,7 +40,7 @@ import {
   getForwards as bosGetForwards
 } from 'balanceofsatoshis/network/index.js'
 
-const { trunc, min, ceil, random } = Math
+const { trunc, min, ceil } = Math
 
 // reused authentication object or making new ones uses up a TON of memory
 // re-initialize if node restarts with bos.initializeAuth()
@@ -57,7 +60,12 @@ const MAX_RAM_USE_MB = 250
 // This ms delay is longest it will ever back off from retrying if auth fails
 const MAX_RETRY_DELAY = 21 * 60 * 1000 // 21 minutes
 
-// returns {closing_balance, offchain_balance, offchain_pending, onchain_balance, onchain_vbytes}
+// data from bos balance --detailed with onchain_confirmed from bos balance --onchain --confirmed
+// returns {
+//   closing_balance, conflicted_pending, invalid_pending, offchain_balance,
+//   offchain_pending, onchain_confirmed, onchain_pending, onchain_vbytes,
+//   utxos_count
+// }
 const getDetailedBalance = async (choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.getDetailedBalance()`)
@@ -65,11 +73,24 @@ const getDetailedBalance = async (choices = {}, log = false) => {
       lnd: authed ?? (await mylnd()), // required
       ...choices
     })
-    log && console.log(`${getDate()} bos.getDetailedBalance() complete`, res)
+    log && console.log(`${getDate()} bos.getDetailedBalance(): bos balance --detailed complete`, res)
 
-    return removeStyling(res)
+    // coop open channel created odd external utxo that is counted above in current version
+    // --onchain flag however correctly excludes it
+    const resOnChain = await bosGetBalance({
+      lnd: authed ?? (await mylnd()),
+      is_onchain_only: true,
+      is_confirmed: true
+    })
+    log && console.log(`${getDate()} bos.getDetailedBalance(): bos balance --onchain complete`, resOnChain)
+
+    return {
+      ...removeStyling(res),
+      onchain_confirmed: (resOnChain.balance * 1e-8).toFixed(8), // overwrite broken output
+      channel_balance: resOnChain.channel_balance // might as well include
+    }
   } catch (e) {
-    console.error(`\n${getDate()} bos.getDetailedBalance() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.getDetailedBalance() aborted.`, e?.message || e)
     return {}
   }
 }
@@ -90,7 +111,7 @@ const getFeesPaid = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesPaid() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesPaid() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.getFeesPaid() aborted.`, e?.message || e)
     return {}
   }
 }
@@ -110,7 +131,7 @@ const getFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getFeesChart() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.getFeesChart() aborted.`, e?.message || e)
     return {}
   }
 }
@@ -147,7 +168,7 @@ const getChainFeesChart = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.getChainFeesChart() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.getChainFeesChart() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.getChainFeesChart() aborted.`, e?.message || e)
     return { data: [] }
   }
 }
@@ -166,7 +187,7 @@ const forwards = async (choices = {}, log = false) => {
     log && console.log(`${getDate()} bos.forwards() complete`, res)
     return res.peers
   } catch (e) {
-    console.error(`\n${getDate()} bos.forwards() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.forwards() aborted.`, e?.message || e)
     return []
   }
 }
@@ -180,7 +201,7 @@ const reconnect = async (log = false) => {
     log && console.log(`${getDate()} bos.reconnect() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.reconnect() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.reconnect() aborted.`, e?.message || e)
   }
 }
 
@@ -234,7 +255,7 @@ const rebalance = async (
     // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted.`, e?.message)
+    log?.details && console.error(`\n${getDate()} bos.rebalance() aborted.`, e?.message || e)
 
     // if we're retrying on timeouts & avoid wasn't used, rerun again with avoid of low fees
     if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
@@ -247,10 +268,9 @@ const rebalance = async (
       const pkToAlias = await getPublicKeyToAliasTable()
       const alias = ca(pkToAlias[toChannel] || '')
 
-      // log?.details &&
       logDim(
-        `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} with --avoid FEE_RATE<${newAvoidPpm}` +
-          ` to ${alias} ${toChannel.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
+        `${getDate()} Retrying bos.rebalance after ProbeTimeout error @ ${maxFeeRate} maxFeeRate with --avoid FEE_RATE<${newAvoidPpm}` +
+          ` to self through ${alias} ${toChannel.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
       )
 
       // for simplicity will always overwrite or create first item in avoid array
@@ -283,20 +303,22 @@ const rebalance = async (
 
 const send = async (
   {
-    destination, // public key, kind of important
+    destination, // public key or lnurl or lighting address, kind of important
+    destinationPubKey = destination, // if above is not pubkey, this should be
     fromChannel = undefined, // public key
     toChannel = undefined, // public key
     sats = 1, // how much needs to arrive at destination
-    maxMinutes = 1,
+    maxMinutes = 5,
     maxFeeRate = undefined, // ppm, rounded up to next sat
     // use smaller of these fee limits:
     maxFee = undefined, // max fee sats, 1 sat fee per 1 sat arriving somewhere is default max
-    message = undefined, // string to send (reveals sender when used)
+    message = undefined, // string to send (reveals sender unless is_omitting_message_from = true)
     // retryAvoidsOnTimeout = 0
     avoid = [],
     isRebalance = false, // double checks in/out peers specified to avoid using same for both
     is_omitting_message_from = false, // old default to include your key in messages
-    retryAvoidsOnTimeout = 0
+    retryAvoidsOnTimeout = 0,
+    otherArgs = {} // additional arguments to add to bos pushPayment
   },
   log = { details: false, progress: true },
   isRetry = false
@@ -304,7 +326,10 @@ const send = async (
   try {
     const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
     if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
-
+    const isPubkey = str => str.length === 66 && /^[A-F0-9]+$/i.test(str)
+    if (!isPubkey(destination) && !isPubkey(destinationPubKey)) {
+      throw new Error('destination or destinationPubKey must be a pubkey (66char hex)')
+    }
     maxFee = maxFee ?? ceil(0.1 * sats) // 10% fallback if unspecified
     maxFeeRate = maxFeeRate ?? trunc(((1.0 * maxFee) / sats) * 1e6)
     const options = {
@@ -319,7 +344,8 @@ const send = async (
         maxFee // from max fee in exact sats
       ),
       message,
-      is_omitting_message_from
+      is_omitting_message_from,
+      ...otherArgs
     }
 
     log?.details && logDim(`${getDate()} bos.send() to ${destination}`, JSON.stringify(options))
@@ -359,7 +385,8 @@ const send = async (
     */
   } catch (e) {
     log?.progress && console.log('')
-    log?.details && console.error(`\n${getDate()} bos.send() aborted.`, e?.message)
+    log?.details && console.error(`\n${getDate()} bos.send() aborted.`, e?.message || e)
+
     // just max fee suggestions so convert to ppm
     // e.g. [400,"MaxFeeLimitTooLow",{"needed_fee":167}]
 
@@ -369,6 +396,7 @@ const send = async (
       return await send(
         {
           destination,
+          destinationPubKey,
           fromChannel,
           toChannel,
           sats,
@@ -388,19 +416,23 @@ const send = async (
     // handle timeout retries if used, increment avoid filter each time
     // towards half of max fee rate
     if (retryAvoidsOnTimeout && e[1] === 'ProbeTimeout') {
+      // if rebalance, we look at fee into last peer node (fee to ourselves can't change)
+      // if not rebalance, we look at fee into destination
+      const avoidFeeTowardsThisPubkey = isRebalance && toChannel ? toChannel : destinationPubKey
+
       // removed && avoid.length <= 1
       retryAvoidsOnTimeout-- // 1 less retry left now
       const oldAvoidPpm = +(avoid[0] || '').match(/FEE_RATE<(.+?)\//)?.[1] || 0
       // each new retry moves avoid fee rate 25% closer to half max total fee rate
       const newAvoidPpm = trunc(oldAvoidPpm * 0.75 + (maxFeeRate / 2) * 0.25)
-      const newAvoid = `FEE_RATE<${newAvoidPpm}/${toChannel}`
+      const newAvoid = `FEE_RATE<${newAvoidPpm}/${avoidFeeTowardsThisPubkey}`
 
       const pkToAlias = await getPublicKeyToAliasTable()
-      const alias = ca(pkToAlias[toChannel] || '')
+      const alias = ca(pkToAlias[avoidFeeTowardsThisPubkey] || '')
 
       logDim(
-        `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} with --avoid FEE_RATE<${newAvoidPpm}` +
-          ` to ${alias} ${toChannel.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
+        `${getDate()} Retrying bos.send after ProbeTimeout error @ ${maxFeeRate} maxFeeRate with --avoid FEE_RATE<${newAvoidPpm}` +
+          ` to ${alias} ${avoidFeeTowardsThisPubkey.slice(0, 10)}. Retries left: ${retryAvoidsOnTimeout}`
       )
       // for simplicity will always overwrite or create first item in avoid array
       if ((avoid[0] || '').includes('FEE_RATE<')) avoid[0] = newAvoid
@@ -409,6 +441,7 @@ const send = async (
       return await send(
         {
           destination,
+          destinationPubKey,
           fromChannel,
           toChannel,
           sats,
@@ -426,10 +459,10 @@ const send = async (
     }
 
     // sometimes reputations get ruined by broken nodes, helps to reset those rarely
-    if (e[1] === 'UnexpectedSendPaymentFailure') {
-      // 1% chance, every 100 on avg
-      if (random() < 0.01) await callAPI('deleteforwardingreputations')
-    }
+    // if (e[1] === 'UnexpectedSendPaymentFailure') {
+    //   // 1 every 1000 on avg chance
+    //   if (random() < 0.001) await callAPI('deleteforwardingreputations')
+    // }
 
     // failed
     const suggestedFeeRate = e[1] === 'MaxFeeLimitTooLow' ? ceil(((1.0 * +e[2].needed_fee) / sats) * 1e6) : null
@@ -486,12 +519,8 @@ for (const cmd in lnServiceRaw) {
         return (await lnServiceRaw[cmd](arg1_mod, ...otherArgs)) || {}
       }
     } catch (e) {
-      const argsUsed = [
-        { ...arg1, lnd: undefined },
-        ...otherArgs
-      ]
-      logDim(`${getDate()} wrapped lnService.${cmd}${JSON.stringify(argsUsed)} aborted.`, e?.message)
-      if (!e?.message) console.error(e)
+      const argsUsed = [{ ...arg1, lnd: undefined }, ...otherArgs]
+      logDim(`${getDate()} wrapped lnService.${cmd}${JSON.stringify(argsUsed)} aborted.`, e?.message || e)
       return null
     }
   }
@@ -507,7 +536,7 @@ const lnService = lnServiceWrapped
 const callAPI = async (method, choices = {}, log = false) => {
   try {
     // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
-    [['getpeers', 'getPeers']].forEach(r => {
+    ;[['getpeers', 'getPeers']].forEach(r => {
       if (r[0] === method) method = r[1]
     })
     log && logDim(`${getDate()} lnService.${method}()`)
@@ -520,8 +549,7 @@ const callAPI = async (method, choices = {}, log = false) => {
     return res || {}
     // empty object if nothing good yet without caught errors
   } catch (e) {
-    logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted.`, e?.message)
-    if (!e?.message) console.error(e)
+    logDim(`${getDate()} lnService.${method}(), ${JSON.stringify(choices)}) aborted.`, e?.message || e)
     return null
   }
 }
@@ -604,33 +632,26 @@ const peers = async (
   }
 }
 
-// returns {pubkey: my_ppm_fee_rate}
-const getFees = async (log = false) => {
-  try {
-    log && logDim(`${getDate()} bos.getFees()`)
-    const res = await bosAdjustFees({
-      fs: { getFile: readFile }, // required
-      lnd: authed ?? (await mylnd()),
-      logger: {}, // logger not used
-      to: [] // array of pubkeys to adjust fees towards
-    })
-    log && console.log(`${getDate()} bos.getFees() result:`, JSON.stringify(res, fixJSON, 2))
-
-    const myFees = res.rows
-      .slice(1) // remove table headers row
-      .reduce((feeRates, thisPeer) => {
-        // 3rd column is pubkey
-        const pubKey = thisPeer[2]
-        // 2nd column has fee ppm
-        feeRates[pubKey] = +thisPeer[1].match(/\((.*)\)/)[1]
-        return feeRates
-      }, {})
-
-    return myFees
-  } catch (e) {
-    console.error(`${getDate()} bos.getFees() aborted.`, e)
+// way to get fees faster than from gossip info (e.g. getNode), which updates slower
+const getFees = async ({ both = false }, log = false) => {
+  log && logDim(`${getDate()} bos.getFees()`)
+  const idToPubkey = await getIdToPublicKeyTable()
+  const feesForChannelIds = (await lnService.getFeeRates())?.channels
+  if (!feesForChannelIds || !idToPubkey) {
+    console.error(`${getDate()} bos.getFees() failed to fetch data`)
     return null
   }
+  const result = {}
+  for (const channel of feesForChannelIds) {
+    const pubKey = idToPubkey[channel.id]
+    result[pubKey] = both
+      ? {
+          base_fee_mtokens: +channel.base_fee_mtokens || 0,
+          fee_rate: +channel.fee_rate || 0
+        }
+      : +channel.fee_rate || 0
+  }
+  return result
 }
 
 // ------------- custom frequently used functions -------------
@@ -989,7 +1010,7 @@ const getNodeChannels = async ({ public_key, peer_key, byPublicKey = false } = {
     }, {})
     return betterChannels
   } catch (e) {
-    logDim(e?.message)
+    logDim(e?.message || e)
     return null
   }
 }
@@ -1134,7 +1155,7 @@ const callPay = async (choices, log = false) => {
     log && console.log(`${getDate()} bos.callPay() complete`, res)
     return res
   } catch (e) {
-    console.error(`\n${getDate()} bos.call.pay() aborted.`, e?.message)
+    console.error(`\n${getDate()} bos.call.pay() aborted.`, e?.message || e)
     return null
   }
 }
@@ -1203,7 +1224,7 @@ const removePeer = async ({ public_key }, log = false) => {
     log && logDim(`${getDate()} bos.removePeer() done.`, JSON.stringify(res))
     return res
   } catch (e) {
-    log && console.log('bos.removePeer() error:', e?.message)
+    log && console.log('bos.removePeer() error:', e?.message || e)
     return null
   }
 }
@@ -1279,7 +1300,7 @@ const addPeer = async (choices, log = false) => {
     // every socket must have failed
     throw new Error(`${public_key} failed to connect on all sockets (${sockets.length})`)
   } catch (e) {
-    log && logDim(`${getDate()} bos.addPeer(${shortKey}) aborted.`, e?.message)
+    log && logDim(`${getDate()} bos.addPeer(${shortKey}) aborted.`, e?.message || e)
     return null
   }
 }
@@ -1328,7 +1349,7 @@ const initializeAuth = async (
     const newRetryDelay = min(MAX_RETRY_DELAY, retryDelay * 2)
     const newRetryDelaySeconds = trunc(newRetryDelay / 1000)
 
-    logDim(`${getDate()} bos.initializeAuth() error, retrying in ${newRetryDelaySeconds}s, e:`, e?.message)
+    logDim(`${getDate()} bos.initializeAuth() error, retrying in ${newRetryDelaySeconds}s, e:`, e?.message || e)
     authed = undefined
     await sleep(newRetryDelay)
     checkMemoryUsage() // terminates if memory leak found
