@@ -226,6 +226,8 @@ const rebalance = async (
       ...choices
     }
     log?.details && logDim(`${getDate()} bos.rebalance()`, JSON.stringify(options))
+    // logDim(`${getDate()} starting bos.rebalance with avoid of`, JSON.stringify([avoid[0], avoid[1]]))
+
     if (fromChannel === toChannel) throw new Error('fromChannel same as toChannel')
     const res = await bosRebalance({
       fs: { getFile: readFile }, // required
@@ -248,8 +250,9 @@ const rebalance = async (
 
       arrived: finalAmount - feeSpent, // amount arrived at destination
       sent: finalAmount, // total sats sent|spent from source
-      fee: feeSpent // sats paid for fee
+      fee: feeSpent, // sats paid for fee
 
+      avoid
       // ppmSuggested: null
     }
     // e.g. {"fee_rate":250,"rebalanced":100025,"msg":{"rebalance":[{"increased_inbound_on":"ZCXZCXCZ","liquidity_inbound":"0.07391729","liquidity_outbound":"0.07607982"},{"decreased_inbound_on":"ASDASDASD","liquidity_inbound":"0.01627758","liquidity_outbound":"0.00722753"},{"rebalanced":"0.00100025","rebalance_fees_spent":"0.00000025","rebalance_fee_rate":"0.03% (250)"}]}}'
@@ -318,11 +321,12 @@ const send = async (
     isRebalance = false, // double checks in/out peers specified to avoid using same for both
     is_omitting_message_from = false, // old default to include your key in messages
     retryAvoidsOnTimeout = 0,
-    otherArgs = {} // additional arguments to add to bos pushPayment
+    otherArgs = {} // additional arguments to add/override to bos pushPayment
   },
   log = { details: false, progress: true },
   isRetry = false
 ) => {
+  // logDim(`${getDate()} starting bos.send with avoid of`, JSON.stringify([avoid[0], avoid[1]]))
   try {
     const unspecifiedFee = maxFee === undefined && maxFeeRate === undefined
     if (unspecifiedFee) throw new Error('need to specify maxFeeRate or maxFee')
@@ -375,7 +379,9 @@ const send = async (
 
       arrived, // amount arrived at destination
       sent, // total sent (spent) including fee
-      fee: totalFee
+      fee: totalFee,
+
+      avoid // last used avoid (so easier to reuse if needed)
 
       // ppmSuggested: null
     }
@@ -393,6 +399,29 @@ const send = async (
     // if someone JUST changed fee try again just 1 more time
     if (!isRetry && e[1] === 'FeeInsufficient') {
       logDim(`\n${getDate()} retrying bos.send just once after FeeInsufficient error`)
+      return await send(
+        {
+          destination,
+          destinationPubKey,
+          fromChannel,
+          toChannel,
+          sats,
+          maxMinutes,
+          maxFeeRate,
+          maxFee,
+          message,
+          avoid,
+          isRebalance,
+          retryAvoidsOnTimeout
+        },
+        log,
+        true // mark it as a retry
+      )
+    }
+
+    // if unknown paymenthash, invoice must've timed out while trying, try just 1 more time
+    if (!isRetry && e[1] === 'UnknownPaymentHash') {
+      logDim(`\n${getDate()} retrying bos.send just once after UnknownPaymentHash error`)
       return await send(
         {
           destination,
@@ -1373,12 +1402,29 @@ const removeStyling = o =>
     )
   )
 
-// to replace some logger bos uses internally
-const logger = log => ({
-  info: v =>
-    log?.details ? console.log(getDate(), removeStyling(v)) : log?.progress ? process.stdout.write('.') : null,
-  error: v => (log?.details ? console.error(getDate(), v) : log?.progress ? process.stdout.write('!') : null)
-})
+// to replace some logger bos uses internally to handle messages received during a call before response received
+// like trying to find a working route for payment
+// log.details=true would print out everything
+// log.progress=true would print a dot on output
+// log.callback would run function
+const logger = log => {
+  const handleLog = v => {
+    if (log?.details) {
+      // print out details w/o terminal styling
+      console.log(getDate(), removeStyling(v))
+    } else if (log?.progress) {
+      // just print a dot on same line
+      process.stdout.write('.')
+    }
+    // if callback provided, run it on unstyled output
+    if (log?.onLog) log.onLog(removeStyling(v))
+  }
+
+  return {
+    info: handleLog,
+    error: handleLog
+  }
+}
 
 // const copy = item => JSON.parse(JSON.stringify(item, fixJSON))
 
