@@ -6,7 +6,9 @@ const DAYS_FOR_STATS = 30 // days back to look
 const SHOW_PEERS = false // hide direct peers even if used in non-direct path
 
 const initialize = async () => {
-  const me = (await bos.callAPI('getIdentity'))?.public_key
+  // const me = (await bos.callAPI('getIdentity'))?.public_key
+  const me = (await bos.lnService.getIdentity())?.public_key
+  if (!me) return console.log('fetch of my node public key failed')
 
   // get payments
   const paymentEvents = await bos.customGetPaymentEvents({
@@ -85,10 +87,16 @@ const initialize = async () => {
   // const sortedNodes = Object.values(usedNodes).sort((a, b) => b.count - a.count)
 
   for (const node of sortedNodes) {
-    try {
-      const nodeInfo = await bos.callAPI('getNode', { public_key: node.public_key })
-      node.alias = nodeInfo.alias
-    } catch (e) {}
+    // const nodeInfo = await bos.callAPI('getNode', { public_key: node.public_key })``
+    // const nodeInfo = await bos.lnService.getNode({ public_key: node.public_key })
+    // node.alias = nodeInfo.alias
+    const res = await bos.find(node.public_key)
+    const foundNode = res?.nodes?.[0]
+    if (foundNode) {
+      node.alias = foundNode.alias
+      node.capacity = foundNode.capacity
+      node.wasClosedBefore = foundNode.past_channels?.[0]?.closed
+    }
   }
 
   // create array of strings for results per recommendation
@@ -104,6 +112,7 @@ const initialize = async () => {
         const aliasStr = ca(n.alias)
         const satsStr = pretty(n.mtokens / 1000)
         const satsAdjStr = pretty(n.mtokensAdj / 1000)
+        console.log(n.capacity, typeof n.capacity)
         return [
           satsAdjStr.padStart(15),
           satsStr.padStart(15),
@@ -111,7 +120,9 @@ const initialize = async () => {
           countUniqueStr.padStart(7),
           aliasStr.padEnd(30),
           n.public_key.padStart(70),
-          n.isPeer ? ' *' : '  '
+          (n.capacity || '???').padStart(12),
+          n.wasClosedBefore ?? 'was never peer',
+          n.isPeer ? 'is peer now' : '  '
         ]
       }
 
@@ -121,7 +132,6 @@ const initialize = async () => {
   console.log(`
 Recommended new peer nodes in ${chosenPayments.length} transactions in ${DAYS_FOR_STATS} days back range.
 Sorted by sats (adj), which is total sats routed with diminishing new weight each additional time same next-hop is used
-${SHOW_PEERS ? 'If SHOW_PEERS, direct peers (used indirectly) are marked by *' : ''}
   `)
   // table headers
   console.log(
@@ -131,6 +141,7 @@ ${SHOW_PEERS ? 'If SHOW_PEERS, direct peers (used indirectly) are marked by *' :
     'unique'.padStart(7),
     'alias'.padStart(30),
     'pub key'.padStart(70),
+    'capacity'.padStart(12),
     '\n'
   )
   for (const line of resultNodes) {
