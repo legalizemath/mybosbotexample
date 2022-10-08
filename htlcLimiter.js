@@ -24,6 +24,32 @@ The rate of getChannels updates is rate at which granted request counts are clea
 
 */
 
+/*
+
+Limits # of htlcs in each channel
+
+Script periodically checks pending htlcs in channels and fee policy in channels.
+
+What goal of this is:
+1. limit # of htlcs you might have to force close on per channel, minimizing cost from sweeping htlcs
+2. flooding channel require less htlcs to flood but also requires locking up a variety of fees for each channel on this hop
+3. rate limits htlc generation which rate limits growth of channel states in database
+
+In parallel in watches for forwarding requests.
+It gets fee from either forwarding request or calculates it from getChannels response + fee policies.
+It then gets which power of 2 range fee is.
+It looks at how many pending htlcs are already in this fee range in request's incoming & outgoing channels
+If # of htlcs for incoming channel is below some number (ALLOWED_PER_GROUP_MIN or ALLOWED_PER_GROUP_IN)
+and if # of htlcs for outgoing channel is below some number (ALLOWED_PER_GROUP_MIN or ALLOWED_PER_GROUP_OUT)
+it grants the request, otherwise rejects
+
+Now also can limit # of htlcs by size of htlc as secondary check to specifically address how much can end up being settled on chain
+So # of htlcs below SATS_LIMIT sats each are limited to ALLOWED_BELOW_LIMIT_OUT + ALLOWED_BELOW_LIMIT_IN per channel
+
+The rate of getChannels updates is rate at which granted request counts are cleared, so also acts as rate limiter.
+
+*/
+
 import fs from 'fs'
 import { subscribeToForwardRequests } from 'balanceofsatoshis/node_modules/ln-service/index.js'
 import bos from './bos.js'
@@ -36,20 +62,20 @@ const minutes = 60 * seconds
 // settings
 const LOG_FILE_PATH = './logs' // where to store yyyy-mm-dd_htlcLimiter.log files
 const MAX_RAM_USE_MB = null // end process at _ MB usedHeap, set to null to disable
-const UPDATE_DELAY = 12 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
+const UPDATE_DELAY = 10 * seconds // ms between re-checking active htlcs in each channel, effectively rate limiter
 const FEE_UPDATE_DELAY = 42 * minutes // ms between re-checking channel policies
 const LND_CHECK_DELAY = 2 * minutes // ms between retrying lnd if issue
 
 // fee group settings
 const MIN_ORDER_OF_MAGNITUDE = 0 // lowest 2^_ fee group possible (0 means all htlcs with fee rates below 1 sat are in same group)
 const ALLOWED_PER_GROUP_MIN = 2 // smallest amount of htlcs allowed per fee group, overwrites even if ALLOWED_PER_GROUP_IN or ALLOWED_PER_GROUP_OUT is smaller
-const ALLOWED_PER_GROUP_IN = group => group // how many incoming htlcs allowed per fee group
-const ALLOWED_PER_GROUP_OUT = group => group + 1 // * 2 // how many outgoing htlcs allowed per fee group
+const ALLOWED_PER_GROUP_IN = group => group + 2 // how many incoming htlcs allowed per fee group
+const ALLOWED_PER_GROUP_OUT = group => group // * 2 // how many outgoing htlcs allowed per fee group
 
 // unsettled sats per htlc settings (these are utxos we might potentially have to sweep or get lost on fees)
 const SATS_LIMIT = 10000 // can limit # of htlc below this size of sats unsettled, 0 would mean unused
-const ALLOWED_BELOW_LIMIT_IN = 2 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of inward ones
-const ALLOWED_BELOW_LIMIT_OUT = 3 // at most _ utxo<SATS_LIMIT should end up being settled on chain out of outward ones
+const ALLOWED_BELOW_LIMIT_IN = 4 // at most _ utxo<SATS_LIMIT should end up being settled on chain (for considering inward forward requests)
+const ALLOWED_BELOW_LIMIT_OUT = 2 // at most _ utxo<SATS_LIMIT should end up being settled on chain (for considering outward forward requests)
 
 const DEBUG = false
 const PRINT_WHEN_HTLCS_RECOUNTED = false // show when UPDATE_DELAY based recount of htlcs happens
@@ -293,7 +319,7 @@ const getFee = (f, channelUpdate = false, foundId = null) => {
 
 const announce = (f, isAccepted) => {
   printout(
-    isAccepted ? 'accepted htlc' : 'rejected htlc',
+    isAccepted ? '✔ accept htlc' : '⛔ reject htlc',
     `${getSats(f)}`.padStart(10),
     ' amt, ',
     `${getFee(f).toFixed(3)}`.padStart(9),
