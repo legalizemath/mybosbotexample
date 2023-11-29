@@ -1,7 +1,7 @@
 /*
   Wrapper for balanceofsatoshis installed globally
-  Needs node v14+, check: node -v, using v16.13.2
-  Installed/updated with `npm i -g balanceofsatoshis@12.16.3`
+  Needs node v18+, check: node -v, using v20.10.0
+  Installed/updated with `npm i -g balanceofsatoshis@17.5.2`
   Global install linked locally via `npm link balanceofsatoshis`
 
   It's unofficial independent wrapper so if anything changes this can break.
@@ -44,7 +44,7 @@ const { trunc, min, ceil } = Math
 
 // reused authentication object or making new ones uses up a TON of memory
 // re-initialize if node restarts with bos.initializeAuth()
-let authed
+let authed, lnds
 
 // this method updates authentication object from global bos authentication
 // WARNING:
@@ -54,6 +54,10 @@ let authed
 const mylnd = async () => {
   authed = (await lnd.authenticatedLnd({})).lnd
   return authed
+}
+const mylnds = async () => {
+  lnds = (await lnd.getLnds({})).lnds
+  return lnds
 }
 // max MB RAM script can use, above terminated for memory leak
 const MAX_RAM_USE_MB = 250
@@ -70,7 +74,8 @@ const getDetailedBalance = async (choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.getDetailedBalance()`)
     const res = await bosGetDetailedBalance({
-      lnd: authed ?? (await mylnd()), // required
+      lnd: authed ?? await mylnd(),
+      lnds: lnds ?? await mylnds(),
       ...choices
     })
     log && console.log(`${getDate()} bos.getDetailedBalance(): bos balance --detailed complete`, res)
@@ -100,7 +105,8 @@ const getFeesPaid = async (choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.getFeesPaid()`)
     const res = await bosGetFeesPaid({
-      lnds: [authed ?? (await mylnd())], // required
+      lnd: authed ?? await mylnd(),
+      lnds: lnds ?? await mylnds(),
       days: 30,
       // is_most_forwarded_table: // ?
       // is_most_fees_table: // ?
@@ -121,7 +127,8 @@ const getFeesChart = async (choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.getFeesChart()`)
     const res = await bosGetFeesChart({
-      lnds: [authed ?? (await mylnd())], // required
+      lnd: authed ?? await mylnd(),
+      lnds: lnds ?? await mylnds(),
       days: 30,
       is_count: false,
       fs: { getFile: readFile },
@@ -159,7 +166,8 @@ const getChainFeesChart = async (choices = {}, log = false) => {
   try {
     log && logDim(`${getDate()} bos.getChainFeesChart()`)
     const res = await bosGetChainFeesChart({
-      lnds: [authed ?? (await mylnd())], // required
+      lnd: authed ?? await mylnd(),
+      lnds: lnds ?? await mylnds(),
       days: 30,
       is_monochrome: true,
       request,
@@ -565,6 +573,7 @@ const lnService = lnServiceWrapped
 const callAPI = async (method, choices = {}, log = false) => {
   try {
     // for compatibility w/ old method, e.g. 'getpeers' in ln-service has to be 'getPeers'
+    // eslint-disable-next-line no-extra-semi
     ;[['getpeers', 'getPeers']].forEach(r => {
       if (r[0] === method) method = r[1]
     })
@@ -592,7 +601,7 @@ const find = async (query, log = false) => {
       query
     })
   } catch (e) {
-    console.error(`${getDate()} bos.find('${query}') aborted.`, e)
+    logDim(`${getDate()} bos.find('${query}') aborted.`, e)
     return null
   }
 }
@@ -654,6 +663,17 @@ const peers = async (
       outbound_liquidity: 1146107,
       public_key: '555555555555555555555555555555555555555555555555'
     }
+    // some explanations:
+    // https://github.com/alexbosworth/balanceofsatoshis/blob/a93bb83dcb8e308608b23f6d7281884c85b3af1b/display/chart_alias_for_peer.js
+    [is_disconnected]: <Peer is No Longer Connected By Any Channel Bool>
+    [is_forwarding]: <Peer is Forwarding Bool>
+    [is_inbound_disabled]: <Peer Inbound Disabled Bool>
+    [is_inactive]: <Peer Channels Are Disabled Bool>
+    [is_pending]: <Peer Has Pending Liquidity Bool>
+    [is_private]: <Peer is Privately Connected Bool>
+    [is_small_max_htlc]: <Peer Has Small Max HTLC Bool>
+    [is_thawing]: <Peer Channel is Coop Close Restricted Bool>
+
     */
   } catch (e) {
     console.error(`${getDate()} bos.peers() aborted.`, e)
@@ -718,6 +738,7 @@ const sayWithTelegramBot = async ({ token, chat_id, message, parse_mode = 'HTML'
   }
 }
 
+// organizes forwarding events by public_keys of channel peers or just array
 // bos call getForwards (and calls bos call getChannels)
 // and returns by peer: {[public_keys]: [forwards]}
 // or by time: [forwards]
@@ -740,7 +761,7 @@ const customGetForwardingEvents = async (
   {
     days = 1, // how many days ago to look back
     byInPeer = false, // use in-peers as keys instead of out-peers
-    timeArray = false, // return as array of time points instead of object
+    timeArray = false, // return array of events
     max_minutes_search = 2 // safety if takes too long
   } = {},
   log = false
@@ -1051,13 +1072,14 @@ const getNodePolicy = getNodeChannels // another name
 const setPeerPolicy = async (newPolicy, log = false) => {
   const {
     peer_key,
-    by_channel_id,
+    by_channel_id, // setting values by channel id rather than by peer e.g. max_htlc_mtokens
     base_fee_mtokens,
     fee_rate,
     cltv_delta,
     max_htlc_mtokens,
     min_htlc_mtokens,
-    my_key
+    my_key, // my node's public key (to pull gossip data for)
+    keep_below_wumbo = false
   } = newPolicy
 
   if (log) console.log(`${getDate()} setPeerPolicy()`, JSON.stringify(newPolicy, fixJSON))
@@ -1086,11 +1108,12 @@ const setPeerPolicy = async (newPolicy, log = false) => {
       }
       const byId = by_channel_id?.[channel.id]
       // updates seems to fail sometimes for max htlc above wumbo size ~16M completely so lets cap it there
-      // also just in case cap below capacity with subtracted 1% reserve, whichever is smaller
-      const capacity_msats = trunc(0.99 * channel.capacity * 1000)
-      const wumbo_msats = 16777216 * 1000 // 2^24 * 1000
+      // also just in case cap below capacity with subtracted 1% reserves, whichever is smaller
+      const from_capacity_msats = trunc(0.98 * channel.capacity * 1000 - 1)
+      const wumbo_msats = 16777216 * 1000 - 1 // 2^24 * 1000 - 1
       let max_htlc_msats = +(byId?.max_htlc_mtokens ?? max_htlc_mtokens ?? channel.local.max_htlc_mtokens)
-      max_htlc_msats = min(max_htlc_msats, capacity_msats, wumbo_msats)
+      max_htlc_msats = min(max_htlc_msats, from_capacity_msats)
+      if (keep_below_wumbo) max_htlc_msats = min(max_htlc_msats, wumbo_msats)
 
       settings = {
         // channel to change:
@@ -1099,7 +1122,7 @@ const setPeerPolicy = async (newPolicy, log = false) => {
         // apply by descending priority: by-channel setting, overall setting, and then previous unchanged setting
         base_fee_mtokens: String(byId?.base_fee_mtokens ?? base_fee_mtokens ?? channel.local.base_fee_mtokens),
         fee_rate: +(byId?.fee_rate ?? fee_rate ?? channel.local.fee_rate),
-        cltv_delta: +(byId?.cltv_delta ?? cltv_delta ?? channel.local.cltv_delta),
+        cltv_delta: +(byId?.cltv_delta ?? cltv_delta ?? channel.local.cltv_delta ?? 144),
         min_htlc_mtokens: String(byId?.min_htlc_mtokens ?? min_htlc_mtokens ?? channel.local.min_htlc_mtokens),
         max_htlc_mtokens: String(max_htlc_msats)
       }
@@ -1345,7 +1368,10 @@ const initializeAuth = async (
   log && logDim(`${getDate()} bos.initializeAuth(${providedAuth ? 'provided auth' : ''})`)
 
   try {
-    if (!providedAuth) authed = await mylnd()
+    if (!providedAuth) {
+      authed = await mylnd()
+      lnds = await mylnds()
+    }
     if (providedAuth) authed = providedAuth
 
     // doing command checks to see if node is responsive:
